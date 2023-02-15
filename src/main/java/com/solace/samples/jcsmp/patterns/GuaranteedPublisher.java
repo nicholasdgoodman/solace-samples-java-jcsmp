@@ -46,6 +46,8 @@ import com.solacesystems.jcsmp.SessionEventHandler;
 import com.solacesystems.jcsmp.Topic;
 import com.solacesystems.jcsmp.XMLMessageProducer;
 
+import com.solace.samples.jcsmp.polyfill.PartitionedMessageProducer;
+
 public class GuaranteedPublisher {
     
     private static final String SAMPLE_NAME = GuaranteedPublisher.class.getSimpleName();
@@ -54,6 +56,7 @@ public class GuaranteedPublisher {
     private static final int PUBLISH_WINDOW_SIZE = 50;
     private static final int APPROX_MSG_RATE_PER_SEC = 100;
     private static final int PAYLOAD_SIZE = 512;
+    private static final int PARTITION_COUNT = 6;
     
     // remember to add log4j2.xml to your classpath
     private static final Logger logger = LogManager.getLogger();  // log4j2, but could also use SLF4J, JCL, etc.
@@ -91,7 +94,7 @@ public class GuaranteedPublisher {
         });
         session.connect();
         
-        XMLMessageProducer producer = session.getMessageProducer(new PublishCallbackHandler(), new JCSMPProducerEventHandler() {
+        XMLMessageProducer xmlProducer = session.getMessageProducer(new PublishCallbackHandler(), new JCSMPProducerEventHandler() {
             @Override
             public void handleEvent(ProducerEventArgs event) {
                 // as of JCSMP v10.10, this event only occurs when republishing unACKed messages on an unknown flow (DR failover)
@@ -99,6 +102,8 @@ public class GuaranteedPublisher {
             }
         });
         
+        PartitionedMessageProducer producer = PartitionedMessageProducer.from(xmlProducer, PARTITION_COUNT);
+
         ScheduledExecutorService statsPrintingThread = Executors.newSingleThreadScheduledExecutor();
         statsPrintingThread.scheduleAtFixedRate(() -> {
             System.out.printf("%s %s Published msgs/s: %,d%n",API,SAMPLE_NAME,msgSentCounter);  // simple way of calculating message rates
@@ -113,8 +118,8 @@ public class GuaranteedPublisher {
         while (System.in.available() == 0 && !isShutdown) {  // loop until ENTER pressed, or shutdown flag
             message.reset();  // ready for reuse
             // each loop, change the payload as an example
-            char chosenCharacter = (char)(Math.round(msgSentCounter % 26) + 65);  // choose a "random" letter [A-Z]
-            Arrays.fill(payload,(byte)chosenCharacter);  // fill the payload completely with that char
+            char partitionKey = (char)(Math.round(msgSentCounter % 26) + 65);  // choose a "random" letter [A-Z]
+            Arrays.fill(payload,(byte)partitionKey);  // fill the payload completely with that char
             // use a BytesMessage this sample, instead of TextMessage
             message.setData(payload);
             message.setDeliveryMode(DeliveryMode.PERSISTENT);  // required for Guaranteed
@@ -124,8 +129,9 @@ public class GuaranteedPublisher {
             map.putString("sample",API + "_" + SAMPLE_NAME);
             message.setProperties(map);
             message.setCorrelationKey(message);  // used for ACK/NACK correlation locally within the API
+            PartitionedMessageProducer.setPartitionId(message, String.valueOf(partitionKey));
             String topicString = new StringBuilder(TOPIC_PREFIX).append(API.toLowerCase())
-            		.append("/pers/pub/").append(chosenCharacter).toString();
+            		.append("/pers/pub").toString();
             // NOTE: publishing to topic, so make sure GuaranteedSubscriber queue is subscribed to same topic,
             //       or enable "Reject Message to Sender on No Subscription Match" the client-profile
             Topic topic = JCSMPFactory.onlyInstance().createTopic(topicString);

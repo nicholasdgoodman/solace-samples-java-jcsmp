@@ -20,7 +20,6 @@ import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.ConsumerFlowProperties;
 import com.solacesystems.jcsmp.FlowEventArgs;
 import com.solacesystems.jcsmp.FlowEventHandler;
-import com.solacesystems.jcsmp.FlowReceiver;
 import com.solacesystems.jcsmp.JCSMPChannelProperties;
 import com.solacesystems.jcsmp.JCSMPErrorResponseException;
 import com.solacesystems.jcsmp.JCSMPException;
@@ -37,16 +36,18 @@ import java.io.IOException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-public class GuaranteedSubscriber {
+import com.solace.samples.jcsmp.polyfill.PartitionedFlowReceiver;
 
-    private static final String SAMPLE_NAME = GuaranteedSubscriber.class.getSimpleName();
-    private static final String QUEUE_NAME = "q_jcsmp_sub";
+public class GuaranteedSubscriber {
+  
+  private static final String SAMPLE_NAME = GuaranteedSubscriber.class.getSimpleName();
+  private static final String QUEUE_NAME = "q_jcsmp_sub";
     private static final String API = "JCSMP";
     
     private static volatile int msgRecvCounter = 0;                 // num messages received
     private static volatile boolean hasDetectedRedelivery = false;  // detected any messages being redelivered?
     private static volatile boolean isShutdown = false;             // are we done?
-    private static FlowReceiver flowQueueReceiver;
+    private static PartitionedFlowReceiver flowQueueReceiver;
 
     // remember to add log4j2.xml to your classpath
     private static final Logger logger = LogManager.getLogger();  // log4j2, but could also use SLF4J, JCL, etc.
@@ -91,11 +92,11 @@ public class GuaranteedSubscriber {
         System.out.printf("Attempting to bind to queue '%s' on the broker.%n", QUEUE_NAME);
         try {
             // see bottom of file for QueueFlowListener class, which receives the messages from the queue
-            flowQueueReceiver = session.createFlow(new QueueFlowListener(), flow_prop, null, new FlowEventHandler() {
+            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session, new QueueFlowListener(), flow_prop, null, new FlowEventHandler() {
                 @Override
                 public void handleEvent(Object source, FlowEventArgs event) {
                     // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active
-                    logger.info("### Received a Flow event: " + event);
+                    logger.info("### Received a Flow event: " + event.getEvent());
                     // try disabling and re-enabling the queue to see in action
                 }
             });

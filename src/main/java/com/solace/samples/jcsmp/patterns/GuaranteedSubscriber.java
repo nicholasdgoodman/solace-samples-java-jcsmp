@@ -43,6 +43,7 @@ public class GuaranteedSubscriber {
   private static final String SAMPLE_NAME = GuaranteedSubscriber.class.getSimpleName();
   private static final String QUEUE_NAME = "q_jcsmp_sub";
     private static final String API = "JCSMP";
+    private static final int PARTITION_COUNT = 6;
     
     private static volatile int msgRecvCounter = 0;                 // num messages received
     private static volatile boolean hasDetectedRedelivery = false;  // detected any messages being redelivered?
@@ -99,7 +100,7 @@ public class GuaranteedSubscriber {
                     logger.info("### Received a Flow event: " + event.getEvent());
                     // try disabling and re-enabling the queue to see in action
                 }
-            });
+            }, PARTITION_COUNT);
         } catch (OperationNotSupportedException e) {  // not allowed to do this
             throw e;
         } catch (JCSMPErrorResponseException e) {  // something else went wrong: queue not exist, queue shutdown, etc.

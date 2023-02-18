@@ -65,7 +65,7 @@ public class PartitionedFlowReceiver {
   private String parentQueueName;
 
   private PartitionedFlowReceiver(JCSMPSession session, XMLMessageListener listener,
-      ConsumerFlowProperties flowProperties, EndpointProperties endpointProperties, FlowEventHandler flowEventHandler) {
+      ConsumerFlowProperties flowProperties, EndpointProperties endpointProperties, FlowEventHandler flowEventHandler, int partitionCount) {
     this.session = session;
     this.listener = listener;
     this.flowProperties = flowProperties;
@@ -78,7 +78,7 @@ public class PartitionedFlowReceiver {
     this.connectedPartitions = new int[0];
     this.dataFlowReceivers = new HashMap<>();
 
-    this.partitionCount = 6;
+    this.partitionCount = partitionCount;
   }
 
   public static PartitionedFlowReceiver createFlow(
@@ -86,9 +86,10 @@ public class PartitionedFlowReceiver {
     XMLMessageListener listener,
     ConsumerFlowProperties flowProperties,
     EndpointProperties endpointProperties,
-    FlowEventHandler flowEventHandler) throws JCSMPException {
+    FlowEventHandler flowEventHandler,
+    int partitionCount) throws JCSMPException {
     
-    PartitionedFlowReceiver receiver = new PartitionedFlowReceiver(session, listener, flowProperties, endpointProperties, flowEventHandler);
+    PartitionedFlowReceiver receiver = new PartitionedFlowReceiver(session, listener, flowProperties, endpointProperties, flowEventHandler, partitionCount);
     receiver.createMgmtFlow();
     receiver.createCmdConsumer();
     receiver.createStatePublisher();

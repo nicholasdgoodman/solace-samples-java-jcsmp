@@ -44,7 +44,7 @@ public class GuaranteedSubscriber {
   private static final String SAMPLE_NAME = GuaranteedSubscriber.class.getSimpleName();
   private static final String QUEUE_NAME = "q_jcsmp_sub";
     private static final String API = "JCSMP";
-    private static final int PARTITION_COUNT = 6;
+    private static final int PARTITION_COUNT = 4;
     
     private static volatile int msgRecvCounter = 0;                 // num messages received
     private static volatile boolean hasDetectedRedelivery = false;  // detected any messages being redelivered?

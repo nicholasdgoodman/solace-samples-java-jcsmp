@@ -56,7 +56,7 @@ public class GuaranteedPublisher {
     private static final int PUBLISH_WINDOW_SIZE = 50;
     private static final int APPROX_MSG_RATE_PER_SEC = 100;
     private static final int PAYLOAD_SIZE = 512;
-    private static final int PARTITION_COUNT = 6;
+    private static final int PARTITION_COUNT = 4;
     
     // remember to add log4j2.xml to your classpath
     private static final Logger logger = LogManager.getLogger();  // log4j2, but could also use SLF4J, JCL, etc.
@@ -127,9 +127,10 @@ public class GuaranteedPublisher {
             // as another example, let's define a user property!
             SDTMap map = JCSMPFactory.onlyInstance().createMap();
             map.putString("sample",API + "_" + SAMPLE_NAME);
+            map.putString(PartitionedMessageProducer.QUEUE_PARTITION_KEY, String.valueOf(partitionKey));
             message.setProperties(map);
             message.setCorrelationKey(message);  // used for ACK/NACK correlation locally within the API
-            PartitionedMessageProducer.setPartitionId(message, String.valueOf(partitionKey));
+
             String topicString = new StringBuilder(TOPIC_PREFIX).append(API.toLowerCase())
             		.append("/pers/pub").toString();
             // NOTE: publishing to topic, so make sure GuaranteedSubscriber queue is subscribed to same topic,

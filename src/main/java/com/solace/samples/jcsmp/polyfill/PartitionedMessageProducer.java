@@ -11,7 +11,7 @@ import com.solacesystems.jcsmp.XMLMessage;
 import com.solacesystems.jcsmp.XMLMessageProducer;
 
 public class PartitionedMessageProducer {
-  private static final String USER_PROP_PARTITION_KEY = "JMSXGroupId";
+  public static final String QUEUE_PARTITION_KEY = "JMSXGroupId";
 
   private XMLMessageProducer producer;
   private int partitionCount;
@@ -25,15 +25,6 @@ public class PartitionedMessageProducer {
 
   public static PartitionedMessageProducer from(XMLMessageProducer producer, int partitionCount) {
     return new PartitionedMessageProducer(producer, partitionCount);
-  }
-
-  public static void setPartitionId(XMLMessage message, String partitionKey) throws SDTException {
-    SDTMap map = message.getProperties();
-    if(map == null) {
-      map = JCSMPFactory.onlyInstance().createMap();
-    }
-    map.putString(USER_PROP_PARTITION_KEY, partitionKey);
-    message.setProperties(map);
   }
 
   public void send(XMLMessage message, Topic topic) throws JCSMPException {
@@ -51,7 +42,7 @@ public class PartitionedMessageProducer {
       if(map == null) {
         return getRandomPartitionId();
       }
-      String partitionKey = map.getString(USER_PROP_PARTITION_KEY);
+      String partitionKey = map.getString(QUEUE_PARTITION_KEY);
       if(partitionKey == null) {
         return getRandomPartitionId();
       }

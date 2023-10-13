@@ -26,7 +26,6 @@ public abstract class PartitionAssignmentManager {
   private int stateHoldCount;
 
   private HashSet<Integer> assignedPartitions;
-  private int[] connectedPartitions;
   private HashMap<String,int[]> globalConnectedPartitions;
   private Timer stateTimer;
   private boolean isLeader;
@@ -38,7 +37,6 @@ public abstract class PartitionAssignmentManager {
     this.stateHoldCount = 0;
 
     this.assignedPartitions = new HashSet<>();
-    this.connectedPartitions = new int[0];
     this.globalConnectedPartitions = new HashMap<>();
     this.stateTimer = new Timer();
   }
@@ -61,7 +59,7 @@ public abstract class PartitionAssignmentManager {
       return;
     }
     if (destination.startsWith(TOPIC_PREFIX_REBALANCE)) {
-      this.processRebalanceCommand(data);
+            this.processRebalanceCommand(data);
       return;
     }
   }
@@ -75,7 +73,7 @@ public abstract class PartitionAssignmentManager {
     }
 
     int[] senderPartitions = messageToPartitions(data);
-    this.globalConnectedPartitions.put(senderId, senderPartitions);
+        this.globalConnectedPartitions.put(senderId, senderPartitions);
 
     if (senderId.equals(instanceId)) {
       stateHoldCount++;
@@ -117,59 +115,59 @@ public abstract class PartitionAssignmentManager {
   abstract void connectToPartition(String partitionQueueName);
   abstract void disconnectFromPartition(String partitionQueueName);
 
-  // TODO Rename to calculate assignments
   private void requestRebalance() {
-    // Generate default partition-to-consumer mapping (all to leader)
     String[] partitionToConsumer = new String[this.partitionCount];
-    Arrays.fill(partitionToConsumer, this.instanceId);
-    HashMap<String,PartitionAssignments> assignmentMap = new HashMap<>();
+    HashMap<String, PartitionAssignments> assignmentMap = new HashMap<>();
+    PartitionAssignments unassignedPartitions = new PartitionAssignments(null);
 
-    // Iterate over global state and update partition-to-consumer mapping
-    for(Entry<String,int[]> entry : this.globalConnectedPartitions.entrySet()) {
-      String consumerId = entry.getKey();
-      assignmentMap.put(consumerId, new PartitionAssignments(consumerId));
-      for(int partitionId : entry.getValue()) {
-        partitionToConsumer[partitionId] = entry.getKey();
+    for (Entry<String, int[]> connectedPartitionEntry : this.globalConnectedPartitions.entrySet()) {
+      String consumerId = connectedPartitionEntry.getKey();
+      int[] partitionIds = connectedPartitionEntry.getValue();
+      PartitionAssignments assignments = new PartitionAssignments(consumerId);
+
+      for (int partitionId : partitionIds) {
+        partitionToConsumer[partitionId] = consumerId;
+        assignments.addPartition(partitionId);
       }
-    }
-        
-    // Map<string,Integer[]> for consumer-to-partition mapping
-    for(int n = 0; n < partitionToConsumer.length; n++) {
-      String consumerId = partitionToConsumer[n];
-      PartitionAssignments assignments = assignmentMap.get(consumerId);
-      assignments.addPartition(n);
       assignmentMap.put(consumerId, assignments);
     }
+    for (int n = 0; n < partitionToConsumer.length; n++) {
+      if (partitionToConsumer[n] == null) {
+        unassignedPartitions.addPartition(n);
+      }
+    }
 
-    // Perform re-assignments...
+    boolean rebalanceRequired = false;
     PartitionAssignments[] orderedAssignments = assignmentMap.values().toArray(new PartitionAssignments[0]);
-    int assignmentCount = orderedAssignments.length;
 
-    int minAllowedCount = this.partitionCount / assignmentCount;
-    int maxAllowedCount = minAllowedCount + ((this.partitionCount % assignmentCount > 0) ? 1 : 0);
-
-    while(true) {
+    while (true) {
       Arrays.sort(orderedAssignments);
       PartitionAssignments minAssigned = orderedAssignments[0];
       PartitionAssignments maxAssigned = orderedAssignments[orderedAssignments.length - 1];
-      int minAssignedCount = minAssigned.getPartitionCount();
-      int maxAssignedCount = maxAssigned.getPartitionCount();
 
-      if(minAssignedCount == minAllowedCount && maxAssignedCount == maxAllowedCount) {
+      if (unassignedPartitions.getPartitionCount() == 0
+          && (maxAssigned.getPartitionCount() - minAssigned.getPartitionCount() <= 1)) {
         break;
       }
+      rebalanceRequired = true;
 
-      minAssigned.addPartition(maxAssigned.removePartition());
+      if (unassignedPartitions.getPartitionCount() > 0) {
+        minAssigned.addPartition(unassignedPartitions.removePartition());
+      } else {
+        minAssigned.addPartition(maxAssigned.removePartition());
+      }
     }
 
-    for(PartitionAssignments assignments : orderedAssignments) {
-      String topic = String.join("/", 
-        TOPIC_PREFIX_REBALANCE, 
-        this.queueName, 
-        assignments.getConsumerId());
-      byte[] data = partitionsToMessage(assignments.getPartitions());
+    if (rebalanceRequired) {
+      for (PartitionAssignments assignments : orderedAssignments) {
+        String topic = String.join("/",
+            TOPIC_PREFIX_REBALANCE,
+            this.queueName,
+            assignments.getConsumerId());
+        byte[] data = partitionsToMessage(assignments.getPartitions());
 
-      this.sendCommand(topic, data);
+        this.sendCommand(topic, data);
+      }
     }
 
     this.stateHoldCount = 0;
@@ -222,9 +220,13 @@ public abstract class PartitionAssignmentManager {
     public int compareTo(PartitionAssignments that) {
       int size1 = this.getPartitionCount();
       int size2 = that.getPartitionCount();
-      int result = size1 - size2;
+      int sizeResult = size1 - size2;
+    
+      if(sizeResult != 0) {
+        return sizeResult;
+      }
 
-      return result;
+      return this.getConsumerId().compareTo(that.getConsumerId());
     }
     @Override
     public String toString() {
@@ -236,7 +238,9 @@ public abstract class PartitionAssignmentManager {
     @Override
     public void run() {
       String topicString = String.join("/", TOPIC_PREFIX_STATE, queueName, instanceId);
-      byte[] message = partitionsToMessage(connectedPartitions);
+      int[] partitions = assignedPartitions.stream().mapToInt(v->v).toArray();
+      Arrays.sort(partitions);
+      byte[] message = partitionsToMessage(partitions);
       sendCommand(topicString, message);
     }
   }

@@ -20,13 +20,13 @@ public abstract class PartitionAssignmentManager {
   private static final int STATE_UPDATE_PERIOD = 1000;
   private static final int STATE_HOLD_COUNT = 5;
 
-  protected String queueName;
-  protected String instanceId;
-  protected int partitionCount;
+  protected final String queueName;
+  protected final String instanceId;
+  protected final int partitionCount;
+  private final HashSet<Integer> assignedPartitions;
+  private final HashMap<String,int[]> globalConnectedPartitions;
+  
   private int stateHoldCount;
-
-  private HashSet<Integer> assignedPartitions;
-  private HashMap<String,int[]> globalConnectedPartitions;
   private Timer stateTimer;
   private boolean isLeader;
 
@@ -34,10 +34,10 @@ public abstract class PartitionAssignmentManager {
     this.queueName = queueName;
     this.instanceId = java.util.UUID.randomUUID().toString().substring(0,7);
     this.partitionCount = partitionCount;
-    this.stateHoldCount = 0;
-
     this.assignedPartitions = new HashSet<>();
     this.globalConnectedPartitions = new HashMap<>();
+    
+    this.stateHoldCount = 0;
     this.stateTimer = new Timer();
   }
 
@@ -59,7 +59,7 @@ public abstract class PartitionAssignmentManager {
       return;
     }
     if (destination.startsWith(TOPIC_PREFIX_REBALANCE)) {
-            this.processRebalanceCommand(data);
+      this.processRebalanceCommand(data);
       return;
     }
   }
@@ -119,6 +119,8 @@ public abstract class PartitionAssignmentManager {
     String[] partitionToConsumer = new String[this.partitionCount];
     HashMap<String, PartitionAssignments> assignmentMap = new HashMap<>();
     PartitionAssignments unassignedPartitions = new PartitionAssignments(null);
+    
+    boolean rebalanceRequired = false;
 
     for (Entry<String, int[]> connectedPartitionEntry : this.globalConnectedPartitions.entrySet()) {
       String consumerId = connectedPartitionEntry.getKey();
@@ -126,8 +128,13 @@ public abstract class PartitionAssignmentManager {
       PartitionAssignments assignments = new PartitionAssignments(consumerId);
 
       for (int partitionId : partitionIds) {
-        partitionToConsumer[partitionId] = consumerId;
-        assignments.addPartition(partitionId);
+        if (partitionToConsumer[partitionId] == null) {
+          partitionToConsumer[partitionId] = consumerId;
+          assignments.addPartition(partitionId);
+        } else {
+          // previously assigned partition detected. force rebalance.
+          rebalanceRequired = true;
+        }
       }
       assignmentMap.put(consumerId, assignments);
     }
@@ -137,7 +144,6 @@ public abstract class PartitionAssignmentManager {
       }
     }
 
-    boolean rebalanceRequired = false;
     PartitionAssignments[] orderedAssignments = assignmentMap.values().toArray(new PartitionAssignments[0]);
 
     while (true) {
@@ -149,13 +155,15 @@ public abstract class PartitionAssignmentManager {
           && (maxAssigned.getPartitionCount() - minAssigned.getPartitionCount() <= 1)) {
         break;
       }
-      rebalanceRequired = true;
-
+      
       if (unassignedPartitions.getPartitionCount() > 0) {
         minAssigned.addPartition(unassignedPartitions.removePartition());
       } else {
         minAssigned.addPartition(maxAssigned.removePartition());
       }
+
+      // assignments changed. force rebalance.
+      rebalanceRequired = true;
     }
 
     if (rebalanceRequired) {

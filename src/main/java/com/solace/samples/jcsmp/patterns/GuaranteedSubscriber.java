@@ -34,19 +34,25 @@ import com.solacesystems.jcsmp.SessionEventArgs;
 import com.solacesystems.jcsmp.SessionEventHandler;
 import com.solacesystems.jcsmp.XMLMessageListener;
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.HashSet;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.solace.samples.jcsmp.polyfill.PartitionedFlowReceiver;
+import com.solace.samples.jcsmp.utils.OrderedExecutorService;
 
 public class GuaranteedSubscriber {
   
   private static final String SAMPLE_NAME = GuaranteedSubscriber.class.getSimpleName();
   private static final String QUEUE_NAME = "q_jcsmp_sub";
     private static final String API = "JCSMP";
-    private static final int PARTITION_COUNT = 4;
+    private static final int PARTITION_COUNT = 10;
+    private static final int THREAD_COUNT = 4;
     
     private static volatile int msgRecvCounter = 0;                 // num messages received
+    private static volatile HashMap<Long,HashSet<String>> threadToMsgKeysMap = new HashMap<>();
     private static volatile boolean hasDetectedRedelivery = false;  // detected any messages being redelivered?
     private static volatile boolean isShutdown = false;             // are we done?
     private static FlowReceiver flowQueueReceiver;
@@ -94,7 +100,7 @@ public class GuaranteedSubscriber {
         System.out.printf("Attempting to bind to queue '%s' on the broker.%n", QUEUE_NAME);
         try {
             // see bottom of file for QueueFlowListener class, which receives the messages from the queue
-            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session, new QueueFlowListener(), flow_prop, null, new FlowEventHandler() {
+            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session, new QueueFlowListener(THREAD_COUNT), flow_prop, null, new FlowEventHandler() {
                 @Override
                 public void handleEvent(Object source, FlowEventArgs event) {
                     // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active
@@ -121,8 +127,13 @@ public class GuaranteedSubscriber {
         System.out.println(SAMPLE_NAME + " connected, and running. Press [ENTER] to quit.");
         while (System.in.available() == 0 && !isShutdown) {
             Thread.sleep(1000);  // wait 1 second
-            System.out.printf("%s %s Received msgs/s: %,d%n",API,SAMPLE_NAME,msgRecvCounter);  // simple way of calculating message rates
+            String mappings = String.join("; ", threadToMsgKeysMap.entrySet().stream().<String>map(e -> {
+                return String.format("%04x:%s", e.getKey(), e.getValue().size());
+            }).toList());
+
+            System.out.printf("%s %s Received msgs/s: %d [%s]\n", API, SAMPLE_NAME, msgRecvCounter, mappings);  // simple way of calculating message rates
             msgRecvCounter = 0;
+            threadToMsgKeysMap.clear();
             if (hasDetectedRedelivery) {  // try shutting -> enabling the queue on the broker to see this
                 System.out.println("*** Redelivery detected ***");
                 hasDetectedRedelivery = false;  // only show the error once per second
@@ -139,10 +150,15 @@ public class GuaranteedSubscriber {
 
     /** Very simple static inner class, used for receives messages from Queue Flows. **/
     private static class QueueFlowListener implements XMLMessageListener {
+        public static final String QUEUE_PARTITION_KEY = "JMSXGroupId";
+        private final OrderedExecutorService executorService;
+
+        public QueueFlowListener(int nThreads) {
+            this.executorService = OrderedExecutorService.newFixedThreadPool(nThreads);
+        }
 
         @Override
         public void onReceive(BytesXMLMessage msg) {
-            msgRecvCounter++;
             if (msg.getRedelivered()) {  // useful check
                 // this is the broker telling the consumer that this message has been sent and not ACKed before.
                 // this can happen if an exception is thrown, or the broker restarts, or the netowrk disconnects
@@ -152,7 +168,36 @@ public class GuaranteedSubscriber {
             // Messages are removed from the broker queue when the ACK is received.
             // Therefore, DO NOT ACK until all processing/storing of this message is complete.
             // NOTE that messages can be acknowledged from a different thread.
-            msg.ackMessage();  // ACKs are asynchronous
+
+            // Dispatch messages to individual executors for parallel processing
+            String partitionKeyProperty = null;
+            try {
+                partitionKeyProperty = msg.getProperties().get(QUEUE_PARTITION_KEY).toString();
+            } catch (Exception ex) {
+                // Do nothing! just assume there is no key set
+            }
+            final String partitionKey = partitionKeyProperty;
+
+            // Define the message processor:
+            Runnable processMessage = new Runnable() {
+                @Override
+                public void run() {
+                    msgRecvCounter++;
+
+                    long threadId = Thread.currentThread().threadId();
+                    HashSet<String> keys = threadToMsgKeysMap.computeIfAbsent(threadId, (tid) -> new HashSet<>());
+                    keys.add(partitionKey);
+
+                    msg.ackMessage();  // ACKs are asynchronous
+                }
+            };
+
+            // If a partition key is defined, schedule execution based on it
+            if(partitionKey != null) {
+                executorService.execute(processMessage, partitionKey);
+            } else {
+                executorService.execute(processMessage);
+            }
         }
 
         @Override

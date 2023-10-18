@@ -17,7 +17,7 @@
 package com.solace.samples.jcsmp.patterns;
 
 import java.io.IOException;
-import java.util.Arrays;
+import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -56,13 +56,15 @@ public class GuaranteedPublisher {
     private static final int PUBLISH_WINDOW_SIZE = 50;
     private static final int APPROX_MSG_RATE_PER_SEC = 100;
     private static final int PAYLOAD_SIZE = 512;
-    private static final int PARTITION_COUNT = 4;
+    private static final int PARTITION_COUNT = 10;
+    private static final int KEY_COUNT = 1000;
     
     // remember to add log4j2.xml to your classpath
     private static final Logger logger = LogManager.getLogger();  // log4j2, but could also use SLF4J, JCL, etc.
 
     private static volatile int msgSentCounter = 0;                   // num messages sent
     private static volatile boolean isShutdown = false;
+    private static volatile Random random = new Random();
 
     /** Main. */
     public static void main(String... args) throws JCSMPException, IOException, InterruptedException {
@@ -118,16 +120,18 @@ public class GuaranteedPublisher {
         while (System.in.available() == 0 && !isShutdown) {  // loop until ENTER pressed, or shutdown flag
             message.reset();  // ready for reuse
             // each loop, change the payload as an example
-            char partitionKey = (char)(Math.round(msgSentCounter % 26) + 65);  // choose a "random" letter [A-Z]
-            Arrays.fill(payload,(byte)partitionKey);  // fill the payload completely with that char
+            
+            String partitionKey = String.format("PK 8000-%06d", random.nextInt(KEY_COUNT));  // choose a "random" letter [A-Z]
+            random.nextBytes(payload);;  // fill the payload with random binary data
             // use a BytesMessage this sample, instead of TextMessage
+            
             message.setData(payload);
             message.setDeliveryMode(DeliveryMode.PERSISTENT);  // required for Guaranteed
             message.setApplicationMessageId(UUID.randomUUID().toString());  // as an example
             // as another example, let's define a user property!
             SDTMap map = JCSMPFactory.onlyInstance().createMap();
             map.putString("sample",API + "_" + SAMPLE_NAME);
-            map.putString(PartitionedMessageProducer.QUEUE_PARTITION_KEY, String.valueOf(partitionKey));
+            map.putString(PartitionedMessageProducer.QUEUE_PARTITION_KEY, partitionKey);
             message.setProperties(map);
             message.setCorrelationKey(message);  // used for ACK/NACK correlation locally within the API
 

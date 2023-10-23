@@ -13,6 +13,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
+import java.util.stream.Collector;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class OrderedExecutorService implements ExecutorService {
@@ -26,7 +29,7 @@ public class OrderedExecutorService implements ExecutorService {
     this.executorServices = Stream
       .generate(() -> Executors.newSingleThreadExecutor())
       .limit(nThreads)
-      .toList();
+      .collect(Collectors.toList());
     this.random = new Random();
     MessageDigest sha256Digest = null;
     try {
@@ -61,11 +64,9 @@ public class OrderedExecutorService implements ExecutorService {
   @Override
   public List<Runnable> shutdownNow() {
     return executorServices.stream()
-      .<Runnable>mapMulti((es, consumer) -> {
-        for (Runnable pending : es.shutdownNow()) {
-          consumer.accept(pending);
-        }
-    }).toList();
+        .map(s -> s.shutdownNow().stream())
+        .flatMap(Function.identity())
+        .collect(Collectors.toList());
   }
 
   @Override

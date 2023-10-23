@@ -36,6 +36,7 @@ import com.solacesystems.jcsmp.XMLMessageListener;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -129,7 +130,7 @@ public class GuaranteedSubscriber {
             Thread.sleep(1000);  // wait 1 second
             String mappings = String.join("; ", threadToMsgKeysMap.entrySet().stream().<String>map(e -> {
                 return String.format("%04x:%s", e.getKey(), e.getValue().size());
-            }).toList());
+            }).collect(Collectors.toList()));
 
             System.out.printf("%s %s Received msgs/s: %d [%s]\n", API, SAMPLE_NAME, msgRecvCounter, mappings);  // simple way of calculating message rates
             msgRecvCounter = 0;
@@ -184,7 +185,8 @@ public class GuaranteedSubscriber {
                 public void run() {
                     msgRecvCounter++;
 
-                    long threadId = Thread.currentThread().threadId();
+                    @SuppressWarnings("deprecation") // for JDK 19+ compatibility
+                    long threadId = Thread.currentThread().getId();
                     HashSet<String> keys = threadToMsgKeysMap.computeIfAbsent(threadId, (tid) -> new HashSet<>());
                     keys.add(partitionKey);
 

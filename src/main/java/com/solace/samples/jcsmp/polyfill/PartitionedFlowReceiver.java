@@ -168,7 +168,7 @@ public class PartitionedFlowReceiver {
     private XMLMessageConsumer cmdConsumer;
     private XMLMessageProducer cmdProducer;
     private FlowReceiver mgmtFlowReceiver;
-    private HashMap<String,FlowReceiver> dataFlowReceivers;
+    private HashMap<Integer,FlowReceiver> dataFlowReceivers;
 
     public JcsmpPartitionAssignmentManager(
       JCSMPSession session,
@@ -229,41 +229,46 @@ public class PartitionedFlowReceiver {
       }
     }
     @Override
-    void connectToPartition(String partitionQueueName) {
+    void connectToPartition(Integer partitionId) {
+      
       try {
-        FlowReceiver dataFlow = this.createDataFlow(partitionQueueName);
+        FlowReceiver dataFlow = this.createDataFlow(partitionId);
         dataFlow.start();
-        this.dataFlowReceivers.put(partitionQueueName, dataFlow);
+        this.dataFlowReceivers.put(partitionId, dataFlow);
       } catch (JCSMPException e) {
         // TODO Auto-generated catch block
         e.printStackTrace();
       }
     }
     @Override
-    void disconnectFromPartition(String partitionQueueName) {
+    void disconnectFromPartition(Integer partitionId) {
       try {
-        FlowReceiver dataFlow = this.dataFlowReceivers.get(partitionQueueName);
+        FlowReceiver dataFlow = this.dataFlowReceivers.get(partitionId);
         // TODO put delay between stopping and closing to mitigate redelivery
         dataFlow.stop();
         dataFlow.close();
-        this.dataFlowReceivers.remove(partitionQueueName);
+        this.dataFlowReceivers.remove(partitionId);
       } catch (Exception e) {
         // TODO Auto-generated catch block
         e.printStackTrace();
       }     
     }
 
-    private FlowReceiver createDataFlow(String dataQueueName) throws JCSMPException {
+    private FlowReceiver createDataFlow(Integer partitionId) throws JCSMPException {
+      String dataQueueName = this.getPartitionQueueName(partitionId);
+      
       Queue dataQueue = JCSMPFactory.onlyInstance().createQueue(dataQueueName);
       ConsumerFlowProperties dataFlowProperties = new ConsumerFlowProperties();
+      
       dataFlowProperties.setEndpoint(dataQueue);
       dataFlowProperties.setAckMode(this.ackMode);
       dataFlowProperties.setActiveFlowIndication(true);
   
       logger.info("createDataFlow: {}", dataQueueName);
+      XMLMessageListener partitionedMessageListener = new PartitionedMessageListener(this.messageListener, partitionId);
   
       return this.session.createFlow(
-        this.messageListener,
+        partitionedMessageListener,
         dataFlowProperties,
         this.endpointProperties,
         this.dataFlowEventHandler
@@ -297,6 +302,32 @@ public class PartitionedFlowReceiver {
       public void handleErrorEx(Object key, JCSMPException cause, long timestamp) {}
       @Override
       public void responseReceivedEx(Object key) {}
+    }
+    private static class PartitionedMessageListener implements XMLMessageListener {
+      private static final String PARTITION_ID_HEADER = "_compat__kafka_receivedPartitionId";
+      private XMLMessageListener listener;
+      private Integer partitionId;
+
+      public PartitionedMessageListener(XMLMessageListener listener, Integer partitionId) {
+        this.listener = listener;
+        this.partitionId = partitionId;
+      }
+
+      @Override
+      public void onException(JCSMPException exception) {
+        this.listener.onException(exception);
+      }
+
+      @Override
+      public void onReceive(BytesXMLMessage message) {
+        try {
+          message.getProperties().putInteger(PARTITION_ID_HEADER, this.partitionId);
+        } catch (Exception ex) {
+          ex.printStackTrace();
+        }
+        this.listener.onReceive(message);
+      }
+
     }
     private static class MgmtFlowEventHandler implements FlowEventHandler {
       private PartitionAssignmentManager manager;

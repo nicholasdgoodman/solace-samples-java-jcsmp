@@ -102,26 +102,24 @@ public abstract class PartitionAssignmentManager {
       this.assignedPartitions.addAll(newAssignments);
 
       for(Integer partitionId : toDisconnect) {
-        String partitionQueueName = String.join("/", 
-          this.queueName, 
-          Integer.toString(partitionId));
-
-        this.disconnectFromPartition(partitionQueueName);
+        this.disconnectFromPartition(partitionId);
       }
       for(Integer partitionId : toConnect) {
-        String partitionQueueName = String.join("/", 
-          this.queueName, 
-          Integer.toString(partitionId));
-
-        this.connectToPartition(partitionQueueName);
+        this.connectToPartition(partitionId);
       }
     }
   }
 
   abstract void addSubscriptions(String stateTopic, String rebalanceTopic);
   abstract void sendCommand(String topic, byte[] data);
-  abstract void connectToPartition(String partitionQueueName);
-  abstract void disconnectFromPartition(String partitionQueueName);
+  abstract void connectToPartition(Integer partitionId);
+  abstract void disconnectFromPartition(Integer partitionId);
+
+  protected String getPartitionQueueName(Integer partitionId) {
+    return String.join("/", 
+      this.queueName, 
+      Integer.toString(partitionId));
+  }
 
   private void requestRebalance() {
     synchronized(lock) {

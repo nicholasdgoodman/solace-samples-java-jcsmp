@@ -101,7 +101,7 @@ public class GuaranteedSubscriber {
         System.out.printf("Attempting to bind to queue '%s' on the broker.%n", QUEUE_NAME);
         try {
             // see bottom of file for QueueFlowListener class, which receives the messages from the queue
-            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session, new QueueFlowListener(THREAD_COUNT), flow_prop, null, new FlowEventHandler() {
+            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session, new MultiThreadedMessageListener(THREAD_COUNT), flow_prop, null, new FlowEventHandler() {
                 @Override
                 public void handleEvent(Object source, FlowEventArgs event) {
                     // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active
@@ -150,12 +150,26 @@ public class GuaranteedSubscriber {
     ////////////////////////////////////////////////////////////////////////////
 
     /** Very simple static inner class, used for receives messages from Queue Flows. **/
-    private static class QueueFlowListener implements XMLMessageListener {
-        public static final String QUEUE_PARTITION_KEY = "JMSXGroupId";
+    private static class MultiThreadedMessageListener implements XMLMessageListener {
+        private static final String QUEUE_PARTITION_KEY = "JMSXGroupId";
+        private static final String QUEUE_PARTITION_ID = "_compat__kafka_receivedPartitionId";
         private final OrderedExecutorService executorService;
+        private final OrderBy orderBy;
 
-        public QueueFlowListener(int nThreads) {
+        public enum OrderBy {
+            AUTO,
+            PARTITION,
+            KEY,
+            NONE
+        }
+
+        public MultiThreadedMessageListener(int nthreads) {
+            this(nthreads, OrderBy.AUTO);
+        }
+
+        public MultiThreadedMessageListener(int nThreads, OrderBy orderBy) {
             this.executorService = OrderedExecutorService.newFixedThreadPool(nThreads);
+            this.orderBy = orderBy;
         }
 
         @Override
@@ -172,12 +186,15 @@ public class GuaranteedSubscriber {
 
             // Dispatch messages to individual executors for parallel processing
             String partitionKeyProperty = null;
+            Integer partitionIdProperty = null;
             try {
-                partitionKeyProperty = msg.getProperties().get(QUEUE_PARTITION_KEY).toString();
+                partitionKeyProperty = msg.getProperties().getString(QUEUE_PARTITION_KEY);
+                partitionIdProperty = msg.getProperties().getInteger(QUEUE_PARTITION_ID);
             } catch (Exception ex) {
                 // Do nothing! just assume there is no key set
             }
             final String partitionKey = partitionKeyProperty;
+            final int parititionId = partitionIdProperty == null ? Integer.MIN_VALUE : partitionIdProperty.intValue();
 
             // Define the message processor:
             Runnable processMessage = new Runnable() {
@@ -194,10 +211,14 @@ public class GuaranteedSubscriber {
                 }
             };
 
-            // If a partition key is defined, schedule execution based on it
-            if(partitionKey != null) {
+            if(orderBy == OrderBy.KEY || ((orderBy == OrderBy.AUTO) && (partitionKey != null))) {
+                // Schedule processing based on key if defined or explicitly configured
                 executorService.execute(processMessage, partitionKey);
+            } else if (orderBy == OrderBy.PARTITION || ((orderBy == OrderBy.AUTO) && (parititionId >= 0))) {
+                // Schedule processing based on partition if defined or explicitly configured
+                executorService.execute(processMessage, parititionId);
             } else {
+                // Otherwise process messages with no ordering
                 executorService.execute(processMessage);
             }
         }

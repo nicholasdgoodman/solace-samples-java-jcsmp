@@ -14,7 +14,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
-import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -46,6 +45,11 @@ public class OrderedExecutorService implements ExecutorService {
 
   public void execute(Runnable command, String key) {
     int threadId = getThreadId(key);
+    ExecutorService executorService = executorServices.get(threadId);
+    executorService.execute(command);
+  }
+
+  public void execute(Runnable command, int threadId) {
     ExecutorService executorService = executorServices.get(threadId);
     executorService.execute(command);
   }

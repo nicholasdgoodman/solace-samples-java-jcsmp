@@ -100,8 +100,12 @@ public class GuaranteedSubscriber {
 
         System.out.printf("Attempting to bind to queue '%s' on the broker.%n", QUEUE_NAME);
         try {
-            // see bottom of file for QueueFlowListener class, which receives the messages from the queue
-            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session, new MultiThreadedMessageListener(THREAD_COUNT), flow_prop, null, new FlowEventHandler() {
+            // see bottom of file for MultiThreadedMessageListener class, which receives the messages from the queue
+            // uncomment one of the two lines below to partition by partition key or partition id:
+            //XMLMessageListener listener = new MultiThreadedMessageListener(THREAD_COUNT, MultiThreadedMessageListener.OrderBy.KEY);
+            XMLMessageListener listener = new MultiThreadedMessageListener(PARTITION_COUNT, MultiThreadedMessageListener.OrderBy.PARTITION);
+            
+            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session, listener, flow_prop, null, new FlowEventHandler() {
                 @Override
                 public void handleEvent(Object source, FlowEventArgs event) {
                     // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active

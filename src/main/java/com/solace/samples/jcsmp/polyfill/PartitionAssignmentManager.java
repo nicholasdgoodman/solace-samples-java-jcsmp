@@ -11,11 +11,15 @@ import java.util.Stack;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.Map.Entry;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import java.util.stream.Collectors;
 
 public abstract class PartitionAssignmentManager {
   public static final String TOPIC_PREFIX_STATE = "#PQC/state";
   public static final String TOPIC_PREFIX_REBALANCE = "#PQC/rebalance";
+
+  private static final Logger LOGGER = LogManager.getLogger(PartitionAssignmentManager.class);
 
   private static final int STATE_UPDATE_PERIOD = 1000;
   private static final int STATE_HOLD_COUNT = 5;
@@ -32,9 +36,9 @@ public abstract class PartitionAssignmentManager {
   private Timer stateTimer;
   private boolean isLeader;
 
-  public PartitionAssignmentManager(String queueName, int partitionCount) {
+  public PartitionAssignmentManager(String queueName, String instanceId, int partitionCount) {
     this.queueName = queueName;
-    this.instanceId = java.util.UUID.randomUUID().toString().substring(0,7);
+    this.instanceId = instanceId;
     this.partitionCount = partitionCount;
     this.assignedPartitions = new HashSet<>();
     this.globalConnectedPartitions = new HashMap<>();
@@ -44,6 +48,7 @@ public abstract class PartitionAssignmentManager {
   }
 
   public void start() {
+    LOGGER.info("Starting PartitionAssignmentManager, instanceId = '{}'", instanceId);
     this.stateTimer.schedule(new StateProducerTimerTask(), STATE_UPDATE_PERIOD, STATE_UPDATE_PERIOD);
     this.addSubscriptions(
       String.join("/", TOPIC_PREFIX_REBALANCE, this.queueName, this.instanceId),
@@ -58,6 +63,7 @@ public abstract class PartitionAssignmentManager {
   }
 
   public void processCommand(String destination, ByteBuffer data) {
+    LOGGER.debug("Processing command: '{}'", destination);
     if (destination.startsWith(TOPIC_PREFIX_STATE)) {
       this.processStateCommand(destination, data);
       return;
@@ -122,6 +128,7 @@ public abstract class PartitionAssignmentManager {
   }
 
   private void requestRebalance() {
+    LOGGER.info("Evaluating partition assignments for rebalance.");
     synchronized(lock) {
       String[] partitionToConsumer = new String[this.partitionCount];
       HashMap<String, PartitionAssignments> assignmentMap = new HashMap<>();
@@ -139,7 +146,7 @@ public abstract class PartitionAssignmentManager {
             partitionToConsumer[partitionId] = consumerId;
             assignments.addPartition(partitionId);
           } else {
-            // previously assigned partition detected. force rebalance.
+            LOGGER.warn("Previously assigned partition ({}) detected, force rebalance.", partitionId);
             rebalanceRequired = true;
           }
         }
@@ -164,9 +171,14 @@ public abstract class PartitionAssignmentManager {
         }
         
         if (unassignedPartitions.getPartitionCount() > 0) {
-          minAssigned.addPartition(unassignedPartitions.removePartition());
+          int unassignedPartitionId = unassignedPartitions.removePartition();
+          LOGGER.info("Assigning partition {} to {}.", unassignedPartitionId, minAssigned.getConsumerId());
+          minAssigned.addPartition(unassignedPartitionId);
         } else {
-          minAssigned.addPartition(maxAssigned.removePartition());
+          int reassignedPartitionId = maxAssigned.removePartition();
+          LOGGER.info("Reassigning partition {} from {} to {}",
+            reassignedPartitionId, maxAssigned.getConsumerId(), minAssigned.getConsumerId());
+          minAssigned.addPartition(reassignedPartitionId);
         }
   
         // assignments changed. force rebalance.
@@ -174,6 +186,7 @@ public abstract class PartitionAssignmentManager {
       }
   
       if (rebalanceRequired) {
+        LOGGER.info("Broadcasting partition new assignments.");
         for (PartitionAssignments assignments : orderedAssignments) {
           String topic = String.join("/",
               TOPIC_PREFIX_REBALANCE,
@@ -183,6 +196,8 @@ public abstract class PartitionAssignmentManager {
   
           this.sendCommand(topic, data);
         }
+      } else {
+        LOGGER.debug("No reassignments required. Skipping rebalance.");
       }
   
       this.stateHoldCount = 0;

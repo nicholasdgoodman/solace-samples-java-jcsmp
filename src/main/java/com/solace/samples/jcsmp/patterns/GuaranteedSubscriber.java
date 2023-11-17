@@ -34,6 +34,8 @@ import com.solacesystems.jcsmp.SessionEventArgs;
 import com.solacesystems.jcsmp.SessionEventHandler;
 import com.solacesystems.jcsmp.XMLMessageListener;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -44,7 +46,7 @@ public class GuaranteedSubscriber {
   private static final String SAMPLE_NAME = GuaranteedSubscriber.class.getSimpleName();
   private static final String QUEUE_NAME = "q_jcsmp_sub";
     private static final String API = "JCSMP";
-    private static final int PARTITION_COUNT = 4;
+    private static final int PARTITION_COUNT = 10;
     
     private static volatile int msgRecvCounter = 0;                 // num messages received
     private static volatile boolean hasDetectedRedelivery = false;  // detected any messages being redelivered?
@@ -61,6 +63,7 @@ public class GuaranteedSubscriber {
             System.exit(-1);
         }
         System.out.println(API + " " + SAMPLE_NAME + " initializing...");
+        String clientName = ManagementFactory.getRuntimeMXBean().getName();
 
         final JCSMPProperties properties = new JCSMPProperties();
         properties.setProperty(JCSMPProperties.HOST, args[0]);          // host:port
@@ -68,7 +71,9 @@ public class GuaranteedSubscriber {
         properties.setProperty(JCSMPProperties.USERNAME, args[2]);      // client-username
         if (args.length > 3) {
             properties.setProperty(JCSMPProperties.PASSWORD, args[3]);  // client-password
-        }   
+        }
+        properties.setProperty(JCSMPProperties.CLIENT_NAME, clientName);
+
         JCSMPChannelProperties channelProps = new JCSMPChannelProperties();
         channelProps.setReconnectRetries(20);      // recommended settings
         channelProps.setConnectRetriesPerHost(5);  // recommended settings
@@ -152,6 +157,12 @@ public class GuaranteedSubscriber {
             // Messages are removed from the broker queue when the ACK is received.
             // Therefore, DO NOT ACK until all processing/storing of this message is complete.
             // NOTE that messages can be acknowledged from a different thread.
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            }
             msg.ackMessage();  // ACKs are asynchronous
         }
 

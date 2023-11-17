@@ -14,6 +14,7 @@ import com.solacesystems.jcsmp.JCSMPException;
 import com.solacesystems.jcsmp.JCSMPFactory;
 import com.solacesystems.jcsmp.JCSMPInterruptedException;
 import com.solacesystems.jcsmp.JCSMPLogLevel;
+import com.solacesystems.jcsmp.JCSMPProperties;
 import com.solacesystems.jcsmp.JCSMPSession;
 import com.solacesystems.jcsmp.JCSMPStreamingPublishCorrelatingEventHandler;
 import com.solacesystems.jcsmp.Queue;
@@ -30,7 +31,7 @@ import java.util.HashMap;
 
 
 public class PartitionedFlowReceiver {
-  private static final Logger logger = LogManager.getLogger();
+  private static final Logger LOGGER = LogManager.getLogger(PartitionedFlowReceiver.class);
   
   // Sample creation of wrapped FlowReceiver which leverages a PartitionAssignmentManager internally
   // Currently only implements FlowReceiver.start();
@@ -177,7 +178,10 @@ public class PartitionedFlowReceiver {
       EndpointProperties endpointProperties,
       FlowEventHandler flowEventHandler,
       int partitionCount) {
-        super(flowProperties.getEndpoint().getName(), partitionCount);
+        super(
+            flowProperties.getEndpoint().getName(),
+            (String)session.getProperty(JCSMPProperties.CLIENT_NAME),
+            partitionCount);
         this.session = session;
         this.messageListener = listener;
         this.ackMode = flowProperties.getAckMode();
@@ -207,7 +211,7 @@ public class PartitionedFlowReceiver {
     }
     @Override
     void addSubscriptions(String stateTopic, String rebalanceTopic) {
-      logger.info("addSubscriptions({},{})", stateTopic, rebalanceTopic);
+      LOGGER.info("addSubscriptions({},{})", stateTopic, rebalanceTopic);
       try {
         this.session.addSubscription(JCSMPFactory.onlyInstance().createTopic(stateTopic));
         this.session.addSubscription(JCSMPFactory.onlyInstance().createTopic(rebalanceTopic));
@@ -219,6 +223,7 @@ public class PartitionedFlowReceiver {
     }
     @Override
     void sendCommand(String topic, byte[] data) {
+      System.out.print("+");
       BytesMessage message = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
       message.setData(data);
       try {
@@ -230,7 +235,7 @@ public class PartitionedFlowReceiver {
     }
     @Override
     void connectToPartition(Integer partitionId) {
-      
+      LOGGER.info("Connecting to queue {}, partition {}", queueName, partitionId);
       try {
         FlowReceiver dataFlow = this.createDataFlow(partitionId);
         dataFlow.start();
@@ -242,11 +247,15 @@ public class PartitionedFlowReceiver {
     }
     @Override
     void disconnectFromPartition(Integer partitionId) {
+      LOGGER.info("Disconnecting from queue {}, partition {}", queueName, partitionId);
       try {
         FlowReceiver dataFlow = this.dataFlowReceivers.get(partitionId);
         // TODO put delay between stopping and closing to mitigate redelivery
+        LOGGER.debug("Stopping flow from queue {}, partition {}", queueName, partitionId);
         dataFlow.stop();
+        LOGGER.debug("Closing flow from queue {}, partition {}", queueName, partitionId);
         dataFlow.close();
+        LOGGER.debug("Flow from partition queue {}, partition {}", queueName, partitionId);
         this.dataFlowReceivers.remove(partitionId);
       } catch (Exception e) {
         // TODO Auto-generated catch block
@@ -264,7 +273,7 @@ public class PartitionedFlowReceiver {
       dataFlowProperties.setAckMode(this.ackMode);
       dataFlowProperties.setActiveFlowIndication(true);
   
-      logger.info("createDataFlow: {}", dataQueueName);
+      LOGGER.info("Creating data flow to {}", dataQueueName);
       XMLMessageListener partitionedMessageListener = new PartitionedMessageListener(this.messageListener, partitionId);
   
       return this.session.createFlow(
@@ -288,13 +297,14 @@ public class PartitionedFlowReceiver {
       }
       @Override
       public void onReceive(BytesXMLMessage message) {
+        System.out.print(".");
         String destination = message.getDestination().getName();
         ByteBuffer data = message.getAttachmentByteBuffer();
         manager.processCommand(destination, data);
       }
       @Override
       public void onException(JCSMPException exception) {
-        logger.error(exception);
+        LOGGER.error(exception);
       }
     }
     private static class CommandProducerEventHandler implements JCSMPStreamingPublishCorrelatingEventHandler {
@@ -338,11 +348,11 @@ public class PartitionedFlowReceiver {
       @Override
       public void handleEvent(Object source, FlowEventArgs event) {
         if(event.getEvent() == FlowEvent.FLOW_ACTIVE) {
-          logger.info("This Node is now the leader!");
+          LOGGER.info("This Node is now the leader!");
           manager.setLeader(true);
         }
         if(event.getEvent() == FlowEvent.FLOW_INACTIVE) {
-          logger.info("This Node has somehow lost its leader status!");
+          LOGGER.info("This Node has somehow lost its leader status!");
           manager.setLeader(false);
         }
       }

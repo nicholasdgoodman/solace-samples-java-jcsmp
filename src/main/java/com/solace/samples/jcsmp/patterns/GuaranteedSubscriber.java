@@ -34,6 +34,8 @@ import com.solacesystems.jcsmp.SessionEventArgs;
 import com.solacesystems.jcsmp.SessionEventHandler;
 import com.solacesystems.jcsmp.XMLMessageListener;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.stream.Collectors;
@@ -68,6 +70,7 @@ public class GuaranteedSubscriber {
             System.exit(-1);
         }
         System.out.println(API + " " + SAMPLE_NAME + " initializing...");
+        String clientName = ManagementFactory.getRuntimeMXBean().getName();
 
         final JCSMPProperties properties = new JCSMPProperties();
         properties.setProperty(JCSMPProperties.HOST, args[0]);          // host:port
@@ -75,7 +78,9 @@ public class GuaranteedSubscriber {
         properties.setProperty(JCSMPProperties.USERNAME, args[2]);      // client-username
         if (args.length > 3) {
             properties.setProperty(JCSMPProperties.PASSWORD, args[3]);  // client-password
-        }   
+        }
+        properties.setProperty(JCSMPProperties.CLIENT_NAME, clientName);
+
         JCSMPChannelProperties channelProps = new JCSMPChannelProperties();
         channelProps.setReconnectRetries(20);      // recommended settings
         channelProps.setConnectRetriesPerHost(5);  // recommended settings

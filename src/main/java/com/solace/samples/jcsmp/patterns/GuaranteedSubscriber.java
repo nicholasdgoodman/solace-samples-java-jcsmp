@@ -36,10 +36,6 @@ import com.solacesystems.jcsmp.XMLMessageListener;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.stream.Collectors;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -55,8 +51,8 @@ public class GuaranteedSubscriber {
     private static final int THREAD_COUNT = 4;
     
     private static volatile int msgRecvCounter = 0;                 // num messages received
-    private static volatile HashMap<Long,HashSet<String>> threadToMsgKeysMap = new HashMap<>();
-    private static volatile boolean hasDetectedRedelivery = false;  // detected any messages being redelivered?
+    private static volatile int redeliveredMsgCounter = 0;  // detected any messages being redelivered?
+    private static volatile int failedMsgAckCounter = 0;
     private static volatile boolean isShutdown = false;             // are we done?
     private static FlowReceiver flowQueueReceiver;
 
@@ -137,16 +133,15 @@ public class GuaranteedSubscriber {
         System.out.println(SAMPLE_NAME + " connected, and running. Press [ENTER] to quit.");
         while (System.in.available() == 0 && !isShutdown) {
             Thread.sleep(1000);  // wait 1 second
-            String mappings = String.join("; ", threadToMsgKeysMap.entrySet().stream().<String>map(e -> {
-                return String.format("%04x:%s", e.getKey(), e.getValue().size());
-            }).collect(Collectors.toList()));
-
-            System.out.printf("%s %s Received msgs/s: %d [%s]\n", API, SAMPLE_NAME, msgRecvCounter, mappings);  // simple way of calculating message rates
+            System.out.printf("%s %s Received msgs/s: %d%n", API, SAMPLE_NAME, msgRecvCounter);  // simple way of calculating message rates
             msgRecvCounter = 0;
-            threadToMsgKeysMap.clear();
-            if (hasDetectedRedelivery) {  // try shutting -> enabling the queue on the broker to see this
-                System.out.println("*** Redelivery detected ***");
-                hasDetectedRedelivery = false;  // only show the error once per second
+            if (redeliveredMsgCounter > 0) {  // try shutting -> enabling the queue on the broker to see this
+                System.out.printf("*** Redeliveries detected: %d ***%n", redeliveredMsgCounter);
+                redeliveredMsgCounter = 0;  // only show the error once per second
+            }
+            if (failedMsgAckCounter > 0) {
+                System.out.printf("*** Failed message acks detected: %d ***%n", failedMsgAckCounter);
+                failedMsgAckCounter = 0;
             }
         }
         isShutdown = true;
@@ -183,15 +178,13 @@ public class GuaranteedSubscriber {
 
         @Override
         public void onReceive(BytesXMLMessage msg) {
+            msgRecvCounter++;
             if (msg.getRedelivered()) {  // useful check
                 // this is the broker telling the consumer that this message has been sent and not ACKed before.
                 // this can happen if an exception is thrown, or the broker restarts, or the netowrk disconnects
                 // perhaps an error in processing? Should do extra checks to avoid duplicate processing
-                hasDetectedRedelivery = true;
+                redeliveredMsgCounter++;
             }
-            // Messages are removed from the broker queue when the ACK is received.
-            // Therefore, DO NOT ACK until all processing/storing of this message is complete.
-            // NOTE that messages can be acknowledged from a different thread.
 
             // Dispatch messages to individual executors for parallel processing
             String partitionKeyProperty = null;
@@ -208,15 +201,22 @@ public class GuaranteedSubscriber {
             // Define the message processor:
             Runnable processMessage = new Runnable() {
                 @Override
-                public void run() {
-                    msgRecvCounter++;
-
-                    @SuppressWarnings("deprecation") // for JDK 19+ compatibility
-                    long threadId = Thread.currentThread().getId();
-                    HashSet<String> keys = threadToMsgKeysMap.computeIfAbsent(threadId, (tid) -> new HashSet<>());
-                    keys.add(partitionKey);
-
-                    msg.ackMessage();  // ACKs are asynchronous
+                public void run() { 
+                    try {
+                        // Simulate a long-running process
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    
+                    // Messages are removed from the broker queue when the ACK is received.
+                    // Therefore, DO NOT ACK until all processing/storing of this message is complete.
+                    // NOTE that messages can be acknowledged from a different thread.
+                    try {
+                        msg.ackMessage();  // ACKs are asynchronous
+                    } catch (Exception e) {
+                        failedMsgAckCounter++;
+                    }
                 }
             };
 

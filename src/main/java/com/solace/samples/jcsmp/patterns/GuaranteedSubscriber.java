@@ -18,6 +18,7 @@ package com.solace.samples.jcsmp.patterns;
 
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.ConsumerFlowProperties;
+import com.solacesystems.jcsmp.FlowEvent;
 import com.solacesystems.jcsmp.FlowEventArgs;
 import com.solacesystems.jcsmp.FlowEventHandler;
 import com.solacesystems.jcsmp.FlowReceiver;
@@ -45,6 +46,7 @@ public class GuaranteedSubscriber {
     
     private static volatile int msgRecvCounter = 0;                 // num messages received
     private static volatile boolean hasDetectedRedelivery = false;  // detected any messages being redelivered?
+    private static volatile boolean isFlowActive = false;           // do we have a usable, working flow?
     private static volatile boolean isShutdown = false;             // are we done?
     private static FlowReceiver flowQueueReceiver;
 
@@ -88,35 +90,48 @@ public class GuaranteedSubscriber {
         flow_prop.setAckMode(JCSMPProperties.SUPPORTED_MESSAGE_ACK_CLIENT);  // best practice
         flow_prop.setActiveFlowIndication(true);  // Flow events will advise when 
 
-        System.out.printf("Attempting to bind to queue '%s' on the broker.%n", QUEUE_NAME);
-        try {
-            // see bottom of file for QueueFlowListener class, which receives the messages from the queue
-            flowQueueReceiver = session.createFlow(new QueueFlowListener(), flow_prop, null, new FlowEventHandler() {
-                @Override
-                public void handleEvent(Object source, FlowEventArgs event) {
-                    // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active
-                    logger.info("### Received a Flow event: " + event);
-                    // try disabling and re-enabling the queue to see in action
-                }
-            });
-        } catch (OperationNotSupportedException e) {  // not allowed to do this
-            throw e;
-        } catch (JCSMPErrorResponseException e) {  // something else went wrong: queue not exist, queue shutdown, etc.
-            logger.error(e);
-            System.err.printf("%n*** Could not establish a connection to queue '%s': %s%n", QUEUE_NAME, e.getMessage());
-            System.err.println("Create queue using PubSub+ Manager WebGUI, and add subscription "+
-                    GuaranteedPublisher.TOPIC_PREFIX+"*/pers/>");
-            System.err.println("  or see the SEMP CURL scripts inside the 'semp-rest-api' directory.");
-            // could also try to retry, loop and retry until successfully able to connect to the queue
-            System.err.println("NOTE: see QueueProvision sample for how to construct queue with consumer app.");
-            System.err.println("Exiting.");
-            return;
-        }
-        // tell the broker to start sending messages on this queue receiver
-        flowQueueReceiver.start();
+
         // async queue receive working now, so time to wait until done...
-        System.out.println(SAMPLE_NAME + " connected, and running. Press [ENTER] to quit.");
+        System.out.println(SAMPLE_NAME + " connected. Press [ENTER] to quit.");
         while (System.in.available() == 0 && !isShutdown) {
+            // check if we have a usable flow and if not, create a new one
+            if(!isFlowActive) {
+                System.out.printf("Attempting to bind to queue '%s' on the broker.%n", QUEUE_NAME);
+                try {
+                    // see bottom of file for QueueFlowListener class, which receives the messages from the queue
+                    flowQueueReceiver = session.createFlow(new QueueFlowListener(), flow_prop, null, new FlowEventHandler() {
+                        @Override
+                        public void handleEvent(Object source, FlowEventArgs event) {
+                            // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active
+                            logger.info("### Received a Flow event: " + event);
+                            // try disabling and re-enabling the queue to see in action
+
+                            if(event.getEvent() == FlowEvent.FLOW_DOWN) {
+                                // the flow is now down or closed and cannot be re-used anymore
+                                // signal the application to create a new one
+                                logger.info("Flow is DOWN and will no longer receive messages. Create a new one.");
+                                isFlowActive = false;
+                            }
+                        }
+                    });
+                } catch (OperationNotSupportedException e) {  // not allowed to do this
+                    throw e;
+                } catch (JCSMPErrorResponseException e) {  // something else went wrong: queue not exist, queue shutdown, etc.
+                    logger.error(e);
+                    System.err.printf("%n*** Could not establish a connection to queue '%s': %s%n", QUEUE_NAME, e.getMessage());
+                    System.err.println("Create queue using PubSub+ Manager WebGUI, and add subscription "+
+                            GuaranteedPublisher.TOPIC_PREFIX+"*/pers/>");
+                    System.err.println("  or see the SEMP CURL scripts inside the 'semp-rest-api' directory.");
+                    // could also try to retry, loop and retry until successfully able to connect to the queue
+                    System.err.println("NOTE: see QueueProvision sample for how to construct queue with consumer app.");
+                    System.err.println("Exiting.");
+                    return;
+                }
+                // tell the broker to start sending messages on this queue receiver
+                flowQueueReceiver.start();
+                isFlowActive = true;
+            }
+
             Thread.sleep(1000);  // wait 1 second
             System.out.printf("%s %s Received msgs/s: %,d%n",API,SAMPLE_NAME,msgRecvCounter);  // simple way of calculating message rates
             msgRecvCounter = 0;

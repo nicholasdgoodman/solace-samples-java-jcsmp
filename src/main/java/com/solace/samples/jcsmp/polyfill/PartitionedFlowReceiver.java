@@ -179,6 +179,8 @@ public class PartitionedFlowReceiver {
       FlowEventHandler flowEventHandler,
       int partitionCount) {
         super(
+            (String)session.getProperty(JCSMPProperties.VIRTUAL_ROUTER_NAME),
+            (String)session.getProperty(JCSMPProperties.VPN_NAME),
             flowProperties.getEndpoint().getName(),
             (String)session.getProperty(JCSMPProperties.CLIENT_NAME),
             partitionCount);

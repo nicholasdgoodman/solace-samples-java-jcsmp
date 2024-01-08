@@ -26,6 +26,8 @@ public abstract class PartitionAssignmentManager {
 
   private final Object lock = new Object();
 
+  protected final String routerName;
+  protected final String vpnName;
   protected final String queueName;
   protected final String instanceId;
   protected final int partitionCount;
@@ -36,7 +38,9 @@ public abstract class PartitionAssignmentManager {
   private Timer stateTimer;
   private boolean isLeader;
 
-  public PartitionAssignmentManager(String queueName, String instanceId, int partitionCount) {
+  public PartitionAssignmentManager(String routerName, String vpnName, String queueName, String instanceId, int partitionCount) {
+    this.routerName = routerName;
+    this.vpnName = vpnName;
     this.queueName = queueName;
     this.instanceId = instanceId;
     this.partitionCount = partitionCount;
@@ -51,8 +55,8 @@ public abstract class PartitionAssignmentManager {
     LOGGER.info("Starting PartitionAssignmentManager, instanceId = '{}'", instanceId);
     this.stateTimer.schedule(new StateProducerTimerTask(), STATE_UPDATE_PERIOD, STATE_UPDATE_PERIOD);
     this.addSubscriptions(
-      String.join("/", TOPIC_PREFIX_REBALANCE, this.queueName, this.instanceId),
-      String.join("/", TOPIC_PREFIX_STATE, this.queueName, ">" )
+      String.join("/", TOPIC_PREFIX_REBALANCE, this.routerName, this.vpnName, this.queueName, this.instanceId),
+      String.join("/", TOPIC_PREFIX_STATE, this.routerName, this.vpnName, this.queueName, ">" )
     );
   }
 
@@ -76,8 +80,8 @@ public abstract class PartitionAssignmentManager {
 
   public void processStateCommand(String destination, ByteBuffer data) {
     synchronized(lock) {
-      String[] topicTokens = destination.split("/", 4);
-      String senderId = (topicTokens.length == 4) ? topicTokens[3] : null;
+      String[] topicTokens = destination.split("/", 6);
+      String senderId = (topicTokens.length == 6) ? topicTokens[5] : null;
       
       if(!this.isLeader || senderId == null) {
         return;
@@ -190,6 +194,8 @@ public abstract class PartitionAssignmentManager {
         for (PartitionAssignments assignments : orderedAssignments) {
           String topic = String.join("/",
               TOPIC_PREFIX_REBALANCE,
+              this.routerName,
+              this.vpnName,
               this.queueName,
               assignments.getConsumerId());
           byte[] data = partitionsToMessage(assignments.getPartitions());
@@ -269,7 +275,7 @@ public abstract class PartitionAssignmentManager {
     @Override
     public void run() {
       synchronized(lock) {
-        String topicString = String.join("/", TOPIC_PREFIX_STATE, queueName, instanceId);
+        String topicString = String.join("/", TOPIC_PREFIX_STATE, routerName, vpnName, queueName, instanceId);
         int[] partitions = assignedPartitions.stream().mapToInt(v->v).toArray();
         Arrays.sort(partitions);
         byte[] message = partitionsToMessage(partitions);

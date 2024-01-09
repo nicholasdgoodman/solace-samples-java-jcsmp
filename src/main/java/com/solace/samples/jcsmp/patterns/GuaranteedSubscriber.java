@@ -57,7 +57,7 @@ public class GuaranteedSubscriber {
     private static FlowReceiver flowQueueReceiver;
 
     // remember to add log4j2.xml to your classpath
-    private static final Logger logger = LogManager.getLogger();  // log4j2, but could also use SLF4J, JCL, etc.
+    private static final Logger logger = LogManager.getLogger(GuaranteedSubscriber.class);  // log4j2, but could also use SLF4J, JCL, etc.
 
     /** This is the main app.  Use this type of app for receiving Guaranteed messages (e.g. via a queue endpoint). */
     public static void main(String... args) throws JCSMPException, InterruptedException, IOException {
@@ -76,6 +76,7 @@ public class GuaranteedSubscriber {
             properties.setProperty(JCSMPProperties.PASSWORD, args[3]);  // client-password
         }
         properties.setProperty(JCSMPProperties.CLIENT_NAME, clientName);
+        properties.setProperty(JCSMPProperties.SUB_ACK_WINDOW_SIZE, 100);
 
         JCSMPChannelProperties channelProps = new JCSMPChannelProperties();
         channelProps.setReconnectRetries(20);      // recommended settings
@@ -86,7 +87,7 @@ public class GuaranteedSubscriber {
         session = JCSMPFactory.onlyInstance().createSession(properties, null, new SessionEventHandler() {
             @Override
             public void handleEvent(SessionEventArgs event) {  // could be reconnecting, connection lost, etc.
-                logger.info("### Received a Session event: " + event);
+                logger.info("### Received a Session event: [{}]", event);
             }
         });
         session.connect();
@@ -110,7 +111,7 @@ public class GuaranteedSubscriber {
                 @Override
                 public void handleEvent(Object source, FlowEventArgs event) {
                     // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active
-                    logger.info("### Received a Flow event: " + event.getEvent());
+                    logger.info("### Received a Flow event: [{}]", event);
                     // try disabling and re-enabling the queue to see in action
                 }
             }, PARTITION_COUNT);

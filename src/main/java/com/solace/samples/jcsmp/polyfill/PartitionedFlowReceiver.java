@@ -22,6 +22,7 @@ import com.solacesystems.jcsmp.Subscription;
 import com.solacesystems.jcsmp.XMLMessageConsumer;
 import com.solacesystems.jcsmp.XMLMessageListener;
 import com.solacesystems.jcsmp.XMLMessageProducer;
+import com.solacesystems.jcsmp.impl.flow.FlowHandleImpl;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -164,11 +165,12 @@ public class PartitionedFlowReceiver {
     private XMLMessageListener messageListener;
     private String ackMode;
     private EndpointProperties endpointProperties;
-    private DataFlowEventHandler dataFlowEventHandler;
+    private FlowEventHandler flowEventHandler;
 
     private XMLMessageConsumer cmdConsumer;
     private XMLMessageProducer cmdProducer;
     private FlowReceiver mgmtFlowReceiver;
+    private HashMap<Integer,DataFlowEventHandler> dataFlowEventHandlers;
     private HashMap<Integer,FlowReceiver> dataFlowReceivers;
 
     public JcsmpPartitionAssignmentManager(
@@ -188,7 +190,7 @@ public class PartitionedFlowReceiver {
         this.messageListener = listener;
         this.ackMode = flowProperties.getAckMode();
         this.endpointProperties = endpointProperties;
-        this.dataFlowEventHandler = new DataFlowEventHandler(flowEventHandler);
+        this.flowEventHandler = flowEventHandler;
     }
     @Override
     public void start() {
@@ -201,6 +203,7 @@ public class PartitionedFlowReceiver {
         mgmtFlowProperties.setEndpoint(mgmtQueue);
         mgmtFlowProperties.setActiveFlowIndication(true);
 
+        this.dataFlowEventHandlers = new HashMap<>();
         this.dataFlowReceivers = new HashMap<>();
         this.mgmtFlowReceiver = session.createFlow(new MgmtListener(), mgmtFlowProperties, null, new MgmtFlowEventHandler(this));
         this.mgmtFlowReceiver.start();
@@ -239,8 +242,10 @@ public class PartitionedFlowReceiver {
     void connectToPartition(Integer partitionId) {
       LOGGER.info("Connecting to queue {}, partition {}", queueName, partitionId);
       try {
-        FlowReceiver dataFlow = this.createDataFlow(partitionId);
+        DataFlowEventHandler flowEventHandler = this.createDataFlowEventHandler(partitionId);
+        FlowReceiver dataFlow = this.createDataFlow(flowEventHandler, partitionId);
         dataFlow.start();
+        this.dataFlowEventHandlers.put(partitionId, flowEventHandler);
         this.dataFlowReceivers.put(partitionId, dataFlow);
       } catch (JCSMPException e) {
         // TODO Auto-generated catch block
@@ -251,13 +256,17 @@ public class PartitionedFlowReceiver {
     void disconnectFromPartition(Integer partitionId) {
       LOGGER.info("Disconnecting from queue {}, partition {}", queueName, partitionId);
       try {
+        FlowEventHandler flowEventHandler = this.dataFlowEventHandlers.get(partitionId);
         FlowReceiver dataFlow = this.dataFlowReceivers.get(partitionId);
+
         // TODO put delay between stopping and closing to mitigate redelivery
         LOGGER.debug("Stopping flow from queue {}, partition {}", queueName, partitionId);
         dataFlow.stop();
         LOGGER.debug("Closing flow from queue {}, partition {}", queueName, partitionId);
         dataFlow.close();
+        flowEventHandler.handleEvent(dataFlow, new FlowEventArgs(FlowEvent.FLOW_DOWN, "Partition was disconnected", null, 0));
         LOGGER.debug("Flow from partition queue {}, partition {}", queueName, partitionId);
+        this.dataFlowEventHandlers.remove(partitionId);
         this.dataFlowReceivers.remove(partitionId);
       } catch (Exception e) {
         // TODO Auto-generated catch block
@@ -265,7 +274,11 @@ public class PartitionedFlowReceiver {
       }     
     }
 
-    private FlowReceiver createDataFlow(Integer partitionId) throws JCSMPException {
+    private DataFlowEventHandler createDataFlowEventHandler(Integer partitionId) {
+        return new DataFlowEventHandler(this.flowEventHandler, partitionId);
+    }
+
+    private FlowReceiver createDataFlow(FlowEventHandler flowEventHandler, Integer partitionId) throws JCSMPException {
       String dataQueueName = this.getPartitionQueueName(partitionId);
       
       Queue dataQueue = JCSMPFactory.onlyInstance().createQueue(dataQueueName);
@@ -282,7 +295,7 @@ public class PartitionedFlowReceiver {
         partitionedMessageListener,
         dataFlowProperties,
         this.endpointProperties,
-        this.dataFlowEventHandler
+        this.flowEventHandler
       );
     }
     private static class MgmtListener implements XMLMessageListener {
@@ -361,23 +374,28 @@ public class PartitionedFlowReceiver {
     }
     private static class DataFlowEventHandler implements FlowEventHandler {
       private FlowEventHandler flowEventHandler;
-      private int activeFlowCount;
-      public DataFlowEventHandler(FlowEventHandler flowEventHandler) {
+      private int partitionId;
+      
+      public DataFlowEventHandler(FlowEventHandler flowEventHandler, int partitionId) {
         this.flowEventHandler = flowEventHandler;
-        this.activeFlowCount = 0;
+        this.partitionId = partitionId;
       }
       @Override
-      public void handleEvent(Object source, FlowEventArgs event) {
-        if(event.getEvent() == FlowEvent.FLOW_ACTIVE && this.activeFlowCount == 0) {
-          this.activeFlowCount++;
-          flowEventHandler.handleEvent(source, event);
+      public void handleEvent(Object source, FlowEventArgs eventArgs) {
+        
+        LOGGER.info("handleEvent({},{})", source, eventArgs);
+        FlowHandleImpl flowHandle = (FlowHandleImpl)source;
+        FlowEvent event = eventArgs.getEvent();
+        String infoSt = eventArgs.getInfo();
+        Exception ex = eventArgs.getException();
+        int respCode = eventArgs.getResponseCode();
+
+        if(event == FlowEvent.FLOW_ACTIVE) {
+            infoSt = "Partition becomes active";
         }
-        if(event.getEvent() == FlowEvent.FLOW_INACTIVE) {
-          this.activeFlowCount--;
-          if(this.activeFlowCount == 0) {
-            flowEventHandler.handleEvent(source, event);
-          }
-        }
+
+        flowHandle.setPartitionGroupId(partitionId);
+        flowEventHandler.handleEvent(source, new FlowEventArgs(event, infoSt, ex, respCode));
       }
     }
   

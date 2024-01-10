@@ -17,14 +17,21 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 public class OrderedExecutorService implements ExecutorService {
+  private static final Logger LOGGER = LogManager.getLogger(OrderedExecutorService.class);
+
   private final int nThreads;
+  private final boolean[] executorServiceStopRequests;
   private final List<ExecutorService> executorServices;
   private final Random random;
   private final MessageDigest digest;
 
   private OrderedExecutorService(int nThreads) {
     this.nThreads = nThreads;
+    this.executorServiceStopRequests = new boolean[nThreads];
     this.executorServices = Stream
       .generate(() -> Executors.newSingleThreadExecutor())
       .limit(nThreads)
@@ -32,9 +39,9 @@ public class OrderedExecutorService implements ExecutorService {
     this.random = new Random();
     MessageDigest sha256Digest = null;
     try {
-        sha256Digest = MessageDigest.getInstance("SHA-256");
+      sha256Digest = MessageDigest.getInstance("SHA-256");
     } catch (NoSuchAlgorithmException ex) {
-        //this.digest = null;
+      // Do nothing, this exception wont happen
     }
     this.digest = sha256Digest;
   }
@@ -43,26 +50,59 @@ public class OrderedExecutorService implements ExecutorService {
     return new OrderedExecutorService(nThreads);
   }
 
+  public void start(int threadId) {
+    LOGGER.debug("Starting executor service for threadId {}", threadId);
+    executorServiceStopRequests[threadId] = false;
+    ExecutorService executorService = executorServices.get(threadId);
+    synchronized (executorService) {
+      executorService.notifyAll();
+    }
+  }
+
+  public void stop(int threadId) {
+    LOGGER.debug("Stopping executor service for threadId {}", threadId);
+    executorServiceStopRequests[threadId] = true;
+  }
+
+  public void reset(int threadId) {
+    LOGGER.debug("Resting executor service for threadId {}", threadId);
+    ExecutorService executorService = executorServices.get(threadId);
+    if (executorService != null) {
+      shutdownNow(threadId);
+    }
+    executorService = Executors.newSingleThreadExecutor();
+    executorServices.set(threadId, executorService);
+    start(threadId);
+  }
+
   public void execute(Runnable command, String key) {
     int threadId = getThreadId(key);
     ExecutorService executorService = executorServices.get(threadId);
-    executorService.execute(command);
+    executorService.execute(makeStoppable(command, threadId));
   }
 
   public void execute(Runnable command, int threadId) {
     ExecutorService executorService = executorServices.get(threadId);
-    executorService.execute(command);
+    executorService.execute(makeStoppable(command, threadId));
   }
 
   @Override
   public void execute(Runnable command) {
     int threadId = getRandomThreadId();
-    executorServices.get(threadId).execute(command);
+    executorServices.get(threadId).execute(makeStoppable(command, threadId));
   }
 
   @Override
   public void shutdown() {
     executorServices.stream().forEach(es -> es.shutdown());
+  }
+
+  public List<Runnable> shutdownNow(int threadId) {
+    LOGGER.debug("Shutting down executor service for threadId {}", threadId);
+    ExecutorService executorService = executorServices.get(threadId);
+    List<Runnable> result = executorService.shutdownNow();
+    executorServices.set(threadId, null);
+    return result;
   }
 
   @Override
@@ -151,6 +191,27 @@ public class OrderedExecutorService implements ExecutorService {
       throws InterruptedException, ExecutionException, TimeoutException {
     // TODO Auto-generated method stub
     throw new UnsupportedOperationException("Unimplemented method 'invokeAny'");
+  }
+
+  private Runnable makeStoppable(Runnable command, int threadId) {
+    return new Runnable() {
+      @Override
+      public void run() {
+        ExecutorService currentExecutor = executorServices.get(threadId);
+        boolean stopRequested = executorServiceStopRequests[threadId];
+
+        try {
+          if (stopRequested) {
+            synchronized (currentExecutor) {
+              currentExecutor.wait();
+            }
+          }
+        } catch (InterruptedException ex) {
+          return;
+        }
+        command.run();
+      }
+    };
   }
 
   private int getThreadId(String key) {

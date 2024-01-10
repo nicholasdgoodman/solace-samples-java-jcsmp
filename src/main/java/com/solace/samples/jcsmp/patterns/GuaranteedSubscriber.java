@@ -18,6 +18,7 @@ package com.solace.samples.jcsmp.patterns;
 
 import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.ConsumerFlowProperties;
+import com.solacesystems.jcsmp.FlowEvent;
 import com.solacesystems.jcsmp.FlowEventArgs;
 import com.solacesystems.jcsmp.FlowEventHandler;
 import com.solacesystems.jcsmp.FlowReceiver;
@@ -33,8 +34,13 @@ import com.solacesystems.jcsmp.Queue;
 import com.solacesystems.jcsmp.SessionEventArgs;
 import com.solacesystems.jcsmp.SessionEventHandler;
 import com.solacesystems.jcsmp.XMLMessageListener;
+import com.solacesystems.jcsmp.impl.flow.FlowHandleImpl;
+
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -99,22 +105,13 @@ public class GuaranteedSubscriber {
         flow_prop.setEndpoint(queue);
         flow_prop.setAckMode(JCSMPProperties.SUPPORTED_MESSAGE_ACK_CLIENT);  // best practice
         flow_prop.setActiveFlowIndication(true);  // Flow events will advise when 
-
+        
         System.out.printf("Attempting to bind to queue '%s' on the broker.%n", QUEUE_NAME);
         try {
-            // see bottom of file for MultiThreadedMessageListener class, which receives the messages from the queue
-            // uncomment one of the two lines below to partition by partition key or partition id:
-            //XMLMessageListener listener = new MultiThreadedMessageListener(THREAD_COUNT, MultiThreadedMessageListener.OrderBy.KEY);
-            XMLMessageListener listener = new MultiThreadedMessageListener(PARTITION_COUNT, MultiThreadedMessageListener.OrderBy.PARTITION);
-            
-            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session, listener, flow_prop, null, new FlowEventHandler() {
-                @Override
-                public void handleEvent(Object source, FlowEventArgs event) {
-                    // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active
-                    logger.info("### Received a Flow event: [{}]", event);
-                    // try disabling and re-enabling the queue to see in action
-                }
-            }, PARTITION_COUNT);
+            // This listener serves as both he Message Handler and Flow Event Handler
+            MultiThreadedMessageListener messageAndEventListener = new MultiThreadedMessageListener(PARTITION_COUNT);
+            flowQueueReceiver = PartitionedFlowReceiver.createFlow(session,
+                messageAndEventListener, flow_prop, null, messageAndEventListener, PARTITION_COUNT);
         } catch (OperationNotSupportedException e) {  // not allowed to do this
             throw e;
         } catch (JCSMPErrorResponseException e) {  // something else went wrong: queue not exist, queue shutdown, etc.
@@ -155,26 +152,14 @@ public class GuaranteedSubscriber {
     ////////////////////////////////////////////////////////////////////////////
 
     /** Very simple static inner class, used for receives messages from Queue Flows. **/
-    private static class MultiThreadedMessageListener implements XMLMessageListener {
-        private static final String QUEUE_PARTITION_KEY = "JMSXGroupId";
+    private static class MultiThreadedMessageListener implements XMLMessageListener, FlowEventHandler {
         private static final String QUEUE_PARTITION_ID = "_compat__kafka_receivedPartitionId";
+
+        private final Pattern flowEventPartitionPattern = Pattern.compile("^\\[Partition (\\d+)\\]");
         private final OrderedExecutorService executorService;
-        private final OrderBy orderBy;
 
-        public enum OrderBy {
-            AUTO,
-            PARTITION,
-            KEY,
-            NONE
-        }
-
-        public MultiThreadedMessageListener(int nthreads) {
-            this(nthreads, OrderBy.AUTO);
-        }
-
-        public MultiThreadedMessageListener(int nThreads, OrderBy orderBy) {
+        public MultiThreadedMessageListener(int nThreads) {
             this.executorService = OrderedExecutorService.newFixedThreadPool(nThreads);
-            this.orderBy = orderBy;
         }
 
         @Override
@@ -188,16 +173,13 @@ public class GuaranteedSubscriber {
             }
 
             // Dispatch messages to individual executors for parallel processing
-            String partitionKeyProperty = null;
             Integer partitionIdProperty = null;
             try {
-                partitionKeyProperty = msg.getProperties().getString(QUEUE_PARTITION_KEY);
                 partitionIdProperty = msg.getProperties().getInteger(QUEUE_PARTITION_ID);
             } catch (Exception ex) {
                 // Do nothing! just assume there is no key set
             }
-            final String partitionKey = partitionKeyProperty;
-            final int parititionId = partitionIdProperty == null ? Integer.MIN_VALUE : partitionIdProperty.intValue();
+            final int partitionId = partitionIdProperty == null ? Integer.MIN_VALUE : partitionIdProperty.intValue();
 
             // Define the message processor:
             Runnable processMessage = new Runnable() {
@@ -221,16 +203,7 @@ public class GuaranteedSubscriber {
                 }
             };
 
-            if(orderBy == OrderBy.KEY || ((orderBy == OrderBy.AUTO) && (partitionKey != null))) {
-                // Schedule processing based on key if defined or explicitly configured
-                executorService.execute(processMessage, partitionKey);
-            } else if (orderBy == OrderBy.PARTITION || ((orderBy == OrderBy.AUTO) && (parititionId >= 0))) {
-                // Schedule processing based on partition if defined or explicitly configured
-                executorService.execute(processMessage, parititionId);
-            } else {
-                // Otherwise process messages with no ordering
-                executorService.execute(processMessage);
-            }
+            executorService.execute(processMessage, partitionId);
         }
 
         @Override
@@ -242,6 +215,38 @@ public class GuaranteedSubscriber {
                 // Generally unrecoverable exception, probably need to recreate and restart the flow
                 flowQueueReceiver.close();
                 // add logic in main thread to restart FlowReceiver, or can exit the program
+            }
+        }
+
+        @Override
+        public void handleEvent(Object source, FlowEventArgs eventArgs) {
+            // Flow events are usually: active, reconnecting (i.e. unbound), reconnected, active
+            // try disabling and re-enabling the queue to see in action
+            logger.info("### Received a Flow event: [{}]", eventArgs);
+            FlowHandleImpl flowHandle = (FlowHandleImpl)source;
+            FlowEvent event = eventArgs.getEvent();
+            String info = eventArgs.getInfo();
+
+            Matcher matcher = flowEventPartitionPattern.matcher(info);
+            
+            Integer partitionId = matcher.find() ? Integer.valueOf(matcher.group(1)) : null;
+
+            if(partitionId == null) {
+                logger.warn("Unable to determine source partition for flow event.");
+                return;
+            }
+
+            if(flowHandle.isClosed() || event == FlowEvent.FLOW_DOWN) {
+                logger.info("Partition is disconnected. Purging queued messages for partition {}", partitionId);
+                List<Runnable> abortedTasks = executorService.shutdownNow(partitionId);
+                logger.info("{} prefetched messages were discarded and not processed.", abortedTasks.size());
+                executorService.reset(partitionId);
+            } else if(flowHandle.isStoppedByApplication() || event == FlowEvent.FLOW_RECONNECTING) {
+                logger.info("Partition flow is stopped. Stopping processing on partition {}", partitionId);
+                executorService.stop(partitionId);
+            } else if(event == FlowEvent.FLOW_RECONNECTED) {
+                logger.info("Partition is reconnected. Starting processing on partition {}", partitionId);
+                executorService.start(partitionId);
             }
         }
     }

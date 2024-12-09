@@ -440,7 +440,7 @@ public class GuaranteedPublisher {
                     // at the tradeoff of lower message throughput
                     Boolean published = publishResult.get();
                     if(published) {
-                        logger.info("Message [{}] Accepted", message.getApplicationMessageId());
+                        logger.info("Message [{}] Acknowledged", message.getApplicationMessageId());
                         break;
                     } else {
                         logger.info("Message [{}] Rejected", message.getApplicationMessageId());
@@ -572,7 +572,7 @@ public class GuaranteedPublisher {
             
             if(this.pendingMessages.size() == TRANSACTION_SIZE) {
                 this.commitMessagesWithRetry();
-                logger.info("Message [{}] Committed\n", message.getApplicationMessageId());
+                logger.info("Message [{}] Committed", message.getApplicationMessageId());
             }
             sequenceNumber++;
         }

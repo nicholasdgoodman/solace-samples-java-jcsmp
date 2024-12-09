@@ -17,6 +17,7 @@
 package com.solace.samples.jcsmp.patterns;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
@@ -48,7 +49,9 @@ import com.solacesystems.jcsmp.SessionEventHandler;
 import com.solacesystems.jcsmp.Topic;
 import com.solacesystems.jcsmp.XMLMessage;
 import com.solacesystems.jcsmp.XMLMessageProducer;
+import com.solacesystems.jcsmp.transaction.RollbackException;
 import com.solacesystems.jcsmp.transaction.TransactedSession;
+import com.solacesystems.jcsmp.transaction.TransactionResultUnknownException;
 
 public class GuaranteedPublisher {
     private static final String SAMPLE_NAME = GuaranteedPublisher.class.getSimpleName();
@@ -192,6 +195,8 @@ public class GuaranteedPublisher {
             XMLMessage message = createMessage(payload);
             Topic topic = JCSMPFactory.onlyInstance().createTopic(topicString);
             
+            logger.info("Message [{}] Sending...", message.getApplicationMessageId());
+
             message.setCorrelationKey(new Pair<XMLMessage,Topic>(message, topic));  // used for ACK/NACK correlation locally within the API
             this.producer.send(message, topic);
             
@@ -300,6 +305,8 @@ public class GuaranteedPublisher {
         public void sendMessage(byte[] payload, String topicString) throws JCSMPException {
             XMLMessage message = createMessage(payload);
             Topic topic = JCSMPFactory.onlyInstance().createTopic(topicString);
+            
+            logger.info("Message [{}] Sending...", message.getApplicationMessageId());
             
             message.setCorrelationKey(new Pair<XMLMessage,Topic>(message, topic));  // used for ACK/NACK correlation locally within the API
             this.producer.send(message, topic);
@@ -420,18 +427,20 @@ public class GuaranteedPublisher {
             
             while(true) {
                 try {
+                    logger.info("Message [{}] Sending...", message.getApplicationMessageId());
+                    
                     CompletableFuture<Boolean> publishResult = new CompletableFuture<Boolean>();
                     message.setCorrelationKey(publishResult);  // used for ACK/NACK correlation locally within the API
                     this.producer.send(message, topic);
-                    logger.info("Message [{}] Sent", message.getApplicationMessageId());
                     
+                    logger.info("Message [{}] Sent", message.getApplicationMessageId());
                     
                     // Here we block the calling thread until the current publish operation succeeds
                     // this is a more direct approach to one-by-one messaging and prevents out-of-order messaging
                     // at the tradeoff of lower message throughput
                     Boolean published = publishResult.get();
                     if(published) {
-                        logger.info("Message [{}] Acceped", message.getApplicationMessageId());
+                        logger.info("Message [{}] Accepted", message.getApplicationMessageId());
                         break;
                     } else {
                         logger.info("Message [{}] Rejected", message.getApplicationMessageId());
@@ -510,6 +519,7 @@ public class GuaranteedPublisher {
         private static final int PUBLISH_WINDOW_SIZE = 20;
         private static final int CHANNEL_RECONNECT_RETRIES = 20;
         private static final int CHANNEL_CONNECT_RETRIES_PER_HOST = 5;
+        private static final int TRANSACTION_SIZE = 10;
 
         private JCSMPProperties sessionProps;
         private JCSMPSession session;
@@ -517,6 +527,7 @@ public class GuaranteedPublisher {
         private int sequenceNumber = 0;
 
         private TransactedSession transactedSession;
+        private ArrayList<Pair<XMLMessage,Topic>> pendingMessages;
 
         public TransactedPublisher(String host, String vpnName, String userName, String password) {
             this.sessionProps = new JCSMPProperties();
@@ -532,6 +543,8 @@ public class GuaranteedPublisher {
             channelProps.setReconnectRetries(CHANNEL_RECONNECT_RETRIES);      // recommended settings
             channelProps.setConnectRetriesPerHost(CHANNEL_CONNECT_RETRIES_PER_HOST);  // recommended settings
             sessionProps.setProperty(JCSMPProperties.CLIENT_CHANNEL_PROPERTIES, channelProps);
+
+            this.pendingMessages = new ArrayList<>(TRANSACTION_SIZE);
         }
 
         public void connect() throws JCSMPException {
@@ -549,13 +562,16 @@ public class GuaranteedPublisher {
             XMLMessage message = createMessage(payload);
             Topic topic = JCSMPFactory.onlyInstance().createTopic(topicString);
             
+            logger.info("Message [{}] Sending...", message.getApplicationMessageId());
+
             message.setCorrelationKey(new Pair<XMLMessage,Topic>(message, topic));  // used for ACK/NACK correlation locally within the API
+            this.pendingMessages.add(new Pair<XMLMessage,Topic>(message, topic));
             this.producer.send(message, topic);
             
             logger.info("Message [{}] Sent", message.getApplicationMessageId());
             
-            if(sequenceNumber % 10 == 0) {
-                this.transactedSession.commit();
+            if(this.pendingMessages.size() == TRANSACTION_SIZE) {
+                this.commitMessagesWithRetry();
                 logger.info("Message [{}] Committed\n", message.getApplicationMessageId());
             }
             sequenceNumber++;
@@ -563,6 +579,21 @@ public class GuaranteedPublisher {
 
         public void close() {
             this.session.closeSession();
+        }
+
+        private void commitMessagesWithRetry() throws JCSMPException {
+            while(true) {
+                try {
+                    this.transactedSession.commit();
+                    this.pendingMessages.clear();
+                    return;
+                } catch (RollbackException | TransactionResultUnknownException ex) {
+                    // Could also implement exponential delay with max retries before aborting...
+                    for(Pair<XMLMessage,Topic> messageAndTopic : this.pendingMessages) {
+                        this.producer.send(messageAndTopic.getFirst(), messageAndTopic.getSecond());
+                    }
+                }
+            }
         }
 
         private XMLMessage createMessage(byte[] payload) throws SDTException {
@@ -585,18 +616,29 @@ public class GuaranteedPublisher {
 
             var eventHandler = new JCSMPStreamingPublishCorrelatingEventHandler() {
                 @Override
-                public void handleErrorEx(Object arg0, JCSMPException arg1, long arg2) {
-                    // TODO Auto-generated method stub
-                    throw new UnsupportedOperationException("Unimplemented method 'handleErrorEx'");
+                public void responseReceivedEx(Object key) {
+                    throw new RuntimeException("Received unexpected message ACK from a transacted session.");
                 }
 
                 @Override
-                public void responseReceivedEx(Object arg0) {
-                    // TODO Auto-generated method stub
-                    throw new UnsupportedOperationException("Unimplemented method 'responseReceivedEx'");
-                }};
+                public void handleErrorEx(Object key, JCSMPException cause, long timestamp) {
+                    if (key != null) {
+                        throw new RuntimeException("Received unexpected message NAK from a transacted session.");
+                    } else { // not a NACK, but some other error (ACL violation, connection loss, message too
+                             // big, ...)
+                        logger.warn("### Producer handleErrorEx() callback: %s%n", cause);
+                        if (cause instanceof JCSMPTransportException) { // all reconnect attempts failed
+                            session.closeSession();
+                        } else if (cause instanceof JCSMPErrorResponseException) { // might have some extra info
+                            JCSMPErrorResponseException e = (JCSMPErrorResponseException) cause;
+                            logger.warn("Specifics: " + JCSMPErrorResponseSubcodeEx.getSubcodeAsString(e.getSubcodeEx())
+                                    + ": " + e.getResponsePhrase());
+                        }
+                    }
+                }
+            };
 
-            this.session.getMessageProducer(eventHandler);
+            this.session.getMessageProducer(eventHandler); // <- not sure why this is needed, but it is...
             return this.transactedSession.createProducer(flowProperties, eventHandler);
         }
     }    

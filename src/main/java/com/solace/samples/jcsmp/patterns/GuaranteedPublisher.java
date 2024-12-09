@@ -18,7 +18,7 @@ package com.solace.samples.jcsmp.patterns;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -27,7 +27,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.solacesystems.jcsmp.BytesMessage;
-import com.solacesystems.jcsmp.BytesXMLMessage;
 import com.solacesystems.jcsmp.DeliveryMode;
 import com.solacesystems.jcsmp.JCSMPChannelProperties;
 import com.solacesystems.jcsmp.JCSMPErrorResponseException;
@@ -39,151 +38,355 @@ import com.solacesystems.jcsmp.JCSMPProperties;
 import com.solacesystems.jcsmp.JCSMPSession;
 import com.solacesystems.jcsmp.JCSMPStreamingPublishCorrelatingEventHandler;
 import com.solacesystems.jcsmp.JCSMPTransportException;
+import com.solacesystems.jcsmp.Pair;
 import com.solacesystems.jcsmp.ProducerEventArgs;
+import com.solacesystems.jcsmp.ProducerFlowProperties;
+import com.solacesystems.jcsmp.SDTException;
 import com.solacesystems.jcsmp.SDTMap;
 import com.solacesystems.jcsmp.SessionEventArgs;
 import com.solacesystems.jcsmp.SessionEventHandler;
 import com.solacesystems.jcsmp.Topic;
+import com.solacesystems.jcsmp.XMLMessage;
 import com.solacesystems.jcsmp.XMLMessageProducer;
+import com.solacesystems.jcsmp.transaction.TransactedSession;
+
 
 public class GuaranteedPublisher {
     
     private static final String SAMPLE_NAME = GuaranteedPublisher.class.getSimpleName();
-    static final String TOPIC_PREFIX = "solace/samples/";  // used as the topic "root"
+    static final String TOPIC_PREFIX = "solace/samples";  // used as the topic "root"
     private static final String API = "JCSMP";
-    private static final int PUBLISH_WINDOW_SIZE = 50;
-    private static final int APPROX_MSG_RATE_PER_SEC = 100;
+    private static final int PUBLISH_WINDOW_SIZE = 20;
+    private static final int APPROX_MSG_RATE_PER_SEC = 50;
+    private static final int MESSAGES_PER_BURST = 10;
     private static final int PAYLOAD_SIZE = 512;
     
     // remember to add log4j2.xml to your classpath
     private static final Logger logger = LogManager.getLogger();  // log4j2, but could also use SLF4J, JCL, etc.
 
     private static volatile int msgSentCounter = 0;                   // num messages sent
-    private static volatile boolean isShutdown = false;
 
     /** Main. */
     public static void main(String... args) throws JCSMPException, IOException, InterruptedException {
-        if (args.length < 3) {  // Check command line arguments
-            System.out.printf("Usage: %s <host:port> <message-vpn> <client-username> [password]%n%n", SAMPLE_NAME);
-            System.exit(-1);
+        if (args.length < 4) {  // Check command line arguments
+            printUsageAndExit();
+            return;
         }
         System.out.println(API + " " + SAMPLE_NAME + " initializing...");
 
-        final JCSMPProperties properties = new JCSMPProperties();
-        properties.setProperty(JCSMPProperties.HOST, args[0]);          // host:port
-        properties.setProperty(JCSMPProperties.VPN_NAME,  args[1]);     // message-vpn
-        properties.setProperty(JCSMPProperties.USERNAME, args[2]);      // client-username
-        if (args.length > 3) {
-            properties.setProperty(JCSMPProperties.PASSWORD, args[3]);  // client-password
+        String mode = args[0];
+        String host = args[1];
+        String vpnName = args[2];
+        String userName = args[3];
+        String password = (args.length > 4) ? args[4] : "";
+
+        WindowedPublisher publisher;
+        switch(mode.toLowerCase()) {
+            case "windowed":
+                publisher = new WindowedPublisher(host, vpnName, userName, password);
+                break;
+            case "onebyone":
+                publisher = new OneByOneMessagePublisher(host, vpnName, userName, password);
+                break;
+            case "blocking":
+                publisher = new BlockingMessagePublisher(host, vpnName, userName, password);
+                break;
+            case "transacted":
+                publisher = new TransactedPublisher(host, vpnName, userName, password);
+                break;
+            default:
+                printUsageAndExit();
+                return;
         }
-        properties.setProperty(JCSMPProperties.PUB_ACK_WINDOW_SIZE, PUBLISH_WINDOW_SIZE);
-        JCSMPChannelProperties channelProps = new JCSMPChannelProperties();
-        channelProps.setReconnectRetries(20);      // recommended settings
-        channelProps.setConnectRetriesPerHost(5);  // recommended settings
-        // https://docs.solace.com/Solace-PubSub-Messaging-APIs/API-Developer-Guide/Configuring-Connection-T.htm
-        properties.setProperty(JCSMPProperties.CLIENT_CHANNEL_PROPERTIES, channelProps);
-        final JCSMPSession session;
-        session = JCSMPFactory.onlyInstance().createSession(properties, null, new SessionEventHandler() {
-            @Override
-            public void handleEvent(SessionEventArgs event) {  // could be reconnecting, connection lost, etc.
-                logger.info("### Received a Session event: " + event);
-            }
-        });
-        session.connect();
-        
-        XMLMessageProducer producer = session.getMessageProducer(new PublishCallbackHandler(), new JCSMPProducerEventHandler() {
-            @Override
-            public void handleEvent(ProducerEventArgs event) {
-                // as of JCSMP v10.10, this event only occurs when republishing unACKed messages on an unknown flow (DR failover)
-                logger.info("*** Received a producer event: " + event);
-            }
-        });
+
+        publisher.connect();
+        System.out.println(API + " " + SAMPLE_NAME + " connected, and running. Press [ENTER] to quit.");
         
         ScheduledExecutorService statsPrintingThread = Executors.newSingleThreadScheduledExecutor();
         statsPrintingThread.scheduleAtFixedRate(() -> {
-            System.out.printf("%s %s Published msgs/s: %,d%n",API,SAMPLE_NAME,msgSentCounter);  // simple way of calculating message rates
+            System.out.printf("%s %s Published msgs/s: %,d%n", API, SAMPLE_NAME, msgSentCounter);  // simple way of calculating message rates
             msgSentCounter = 0;
         }, 1, 1, TimeUnit.SECONDS);
         
-        System.out.println(API + " " + SAMPLE_NAME + " connected, and running. Press [ENTER] to quit.");
         byte[] payload = new byte[PAYLOAD_SIZE];  // preallocate
-        BytesMessage message = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);  // preallocate
-        System.out.println("Publishing to topic '"+ TOPIC_PREFIX + API.toLowerCase() + 
-                "/pers/pub/...', please ensure queue has matching subscription."); 
-        while (System.in.available() == 0 && !isShutdown) {  // loop until ENTER pressed, or shutdown flag
-            message.reset();  // ready for reuse
-            // each loop, change the payload as an example
-            char chosenCharacter = (char)(Math.round(msgSentCounter % 26) + 65);  // choose a "random" letter [A-Z]
-            Arrays.fill(payload,(byte)chosenCharacter);  // fill the payload completely with that char
-            // use a BytesMessage this sample, instead of TextMessage
-            message.setData(payload);
-            message.setDeliveryMode(DeliveryMode.PERSISTENT);  // required for Guaranteed
-            message.setApplicationMessageId(UUID.randomUUID().toString());  // as an example
-            // as another example, let's define a user property!
-            SDTMap map = JCSMPFactory.onlyInstance().createMap();
-            map.putString("sample",API + "_" + SAMPLE_NAME);
-            message.setProperties(map);
-            message.setCorrelationKey(message);  // used for ACK/NACK correlation locally within the API
-            String topicString = new StringBuilder(TOPIC_PREFIX).append(API.toLowerCase())
-            		.append("/pers/pub/").append(chosenCharacter).toString();
-            // NOTE: publishing to topic, so make sure GuaranteedSubscriber queue is subscribed to same topic,
-            //       or enable "Reject Message to Sender on No Subscription Match" the client-profile
-            Topic topic = JCSMPFactory.onlyInstance().createTopic(topicString);
+        
+        String topicStart = String.join("/", TOPIC_PREFIX, API.toLowerCase(), "pers/pub");
+        System.out.printf("Publishing to topic '%s/...', please ensure queue has matching subscription.%n", topicStart); 
+        
+        ScheduledExecutorService messageSendThread = Executors.newSingleThreadScheduledExecutor();
+        messageSendThread.scheduleAtFixedRate(() -> {
             try {
-                producer.send(message, topic);
-                msgSentCounter++;
+                // each loop, change the payload as an example
+                char chosenCharacter = (char)(Math.round(msgSentCounter % 26) + 65);  // choose a "random" letter [A-Z]
+                Arrays.fill(payload,(byte)chosenCharacter);  // fill the payload completely with that char
+
+                String topicString = String.join("/", topicStart, String.valueOf(chosenCharacter));
+                // NOTE: publishing to topic, so make sure GuaranteedSubscriber queue is subscribed to same topic,
+                //       or enable "Reject Message to Sender on No Subscription Match" the client-profile
+                for(int n = 0; n < MESSAGES_PER_BURST; n++) {
+                    publisher.sendMessage(payload, topicString);
+                    msgSentCounter++;
+                }
             } catch (JCSMPException e) {  // threw from send(), only thing that is throwing here, but keep trying (unless shutdown?)
                 logger.warn("### Caught while trying to producer.send()",e);
                 if (e instanceof JCSMPTransportException) {  // all reconnect attempts failed
-                    isShutdown = true;  // let's quit; or, could initiate a new connection attempt
-                }
-            } finally {  // add a delay between messages
-                try {
-                    Thread.sleep(1000 / APPROX_MSG_RATE_PER_SEC);  // do Thread.sleep(0) for max speed
-                    // Note: STANDARD Edition Solace PubSub+ broker is limited to 10k msg/s max ingress
-                } catch (InterruptedException e) {
-                    isShutdown = true;
+                    messageSendThread.shutdown();
                 }
             }
-        }
-        isShutdown = true;
+        }, 0, 1000 / (APPROX_MSG_RATE_PER_SEC / MESSAGES_PER_BURST), TimeUnit.MILLISECONDS);
+
+        System.in.read();
+        messageSendThread.shutdown();
         statsPrintingThread.shutdown();  // stop printing stats
-        Thread.sleep(1500);  // give time for the ACKs to arrive from the broker
-        session.closeSession();
+        Thread.sleep(1500);  // give time for Final ACKs to arrive from the broker
+
+        publisher.close();
         System.out.println("Main thread quitting.");
     }
 
-    ////////////////////////////////////////////////////////////////////////////
-    
-    /** Very simple static inner class, used for handling publish ACKs/NACKs from broker. **/
-    private static class PublishCallbackHandler implements JCSMPStreamingPublishCorrelatingEventHandler {
+    private static void printUsageAndExit() {
+        System.out.printf("Usage: %s [Windowed|OneByOne|Blocking|Transacted] <host:port> <message-vpn> <client-username> [password]%n%n", SAMPLE_NAME);
+        System.exit(-1);
+    }
 
-        @Override
-        public void responseReceivedEx(Object key) {
-            assert key != null;  // this shouldn't happen, this should only get called for an ACK
-            assert key instanceof BytesXMLMessage;
-            logger.debug(String.format("ACK for Message %s", key));  // good enough, the broker has it now
+    private static class WindowedPublisher {
+        protected JCSMPProperties sessionProps;
+        protected JCSMPSession session;
+        protected XMLMessageProducer producer;
+        protected int sequenceNumber = 0;
+
+        public WindowedPublisher(String host, String vpnName, String userName, String password) {
+            this(host, vpnName, userName, password, PUBLISH_WINDOW_SIZE);
+        }
+
+        protected WindowedPublisher(String host, String vpnName, String userName, String password, int publishWindowSize) {
+            this.sessionProps = new JCSMPProperties();
+            sessionProps.setProperty(JCSMPProperties.HOST, host);          // host:port
+            sessionProps.setProperty(JCSMPProperties.VPN_NAME,  vpnName);     // message-vpn
+            sessionProps.setProperty(JCSMPProperties.USERNAME, userName);      // client-username
+            if (password.compareTo("") != 0) {
+                sessionProps.setProperty(JCSMPProperties.PASSWORD, password);  // client-password
+            }
+            sessionProps.setProperty(JCSMPProperties.PUB_ACK_WINDOW_SIZE, publishWindowSize);
+
+            JCSMPChannelProperties channelProps = new JCSMPChannelProperties();
+            channelProps.setReconnectRetries(20);      // recommended settings
+            channelProps.setConnectRetriesPerHost(5);  // recommended settings
+            sessionProps.setProperty(JCSMPProperties.CLIENT_CHANNEL_PROPERTIES, channelProps);
+        }
+
+        public void connect() throws JCSMPException {
+            this.session = JCSMPFactory.onlyInstance().createSession(this.sessionProps, null, new SessionEventHandler() {
+                @Override
+                public void handleEvent(SessionEventArgs event) {  // could be reconnecting, connection lost, etc.
+                    logger.info("### Received a Session event: " + event);
+                }
+            });
+            this.session.connect();
+            this.producer = this.createMessageProducer();
+        }
+
+        public void sendMessage(byte[] payload, String topicString) throws JCSMPException {
+            XMLMessage message = createMessage(payload);
+            Topic topic = JCSMPFactory.onlyInstance().createTopic(topicString);
+            
+            message.setCorrelationKey(new Pair<XMLMessage,Topic>(message, topic));  // used for ACK/NACK correlation locally within the API
+            this.producer.send(message, topic);
+            
+            logger.info("Message [{}] Sent", message.getApplicationMessageId());
+            sequenceNumber++;
         }
         
+        public void close() {
+            this.session.closeSession();
+        }
+
+
+        protected XMLMessageProducer createMessageProducer() throws JCSMPException {
+            return this.session.getMessageProducer(
+                new JCSMPStreamingPublishCorrelatingEventHandler() {
+                    @Override
+                    public void responseReceivedEx(Object key) {
+                        if (key != null) {
+                            handleMessageAck(key);
+                        }
+                    }
+                    @Override
+                    public void handleErrorEx(Object key, JCSMPException cause, long timestamp) {
+                        if (key != null) {
+                            // probably want to do something here.  some error handling possibilities:
+                            //  - send the message again
+                            //  - send it somewhere else (error handling queue?)
+                            //  - log and continue
+                            //  - pause and retry (backoff) - maybe set a flag to slow down the publisher
+                            handleMessageNak(key);
+                        } else {  // not a NACK, but some other error (ACL violation, connection loss, message too big, ...)
+                            logger.warn("### Producer handleErrorEx() callback: %s%n", cause);
+                            if (cause instanceof JCSMPTransportException) {  // all reconnect attempts failed
+                                session.closeSession();
+                            } else if (cause instanceof JCSMPErrorResponseException) {  // might have some extra info
+                                JCSMPErrorResponseException e = (JCSMPErrorResponseException)cause;
+                                logger.warn("Specifics: " + JCSMPErrorResponseSubcodeEx.getSubcodeAsString(e.getSubcodeEx()) + ": " + e.getResponsePhrase());
+                            }
+                        }
+                    }
+                },
+                new JCSMPProducerEventHandler() {
+                    @Override
+                    public void handleEvent(ProducerEventArgs event) {
+                        // as of JCSMP v10.10, this event only occurs when republishing unACKed messages
+                        // on an unknown flow (DR failover)
+                        logger.info("*** Received a producer event: " + event);
+                    }
+                });
+        }
+        protected XMLMessage createMessage(byte[] payload) throws SDTException {
+            BytesMessage message = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
+            message.setData(payload);
+            message.setDeliveryMode(DeliveryMode.PERSISTENT);  // required for Guaranteed
+            message.setApplicationMessageId(String.format("%08d", sequenceNumber));  // as an example
+            message.setSequenceNumber(sequenceNumber);
+
+            // as another example, let's define a user property!
+            SDTMap map = JCSMPFactory.onlyInstance().createMap();
+            map.putString("sample", API + "_" + SAMPLE_NAME);
+            message.setProperties(map);
+            return message;
+        }
+
+        protected void handleMessageAck(Object key) {
+            @SuppressWarnings("unchecked")
+            Pair<XMLMessage,Topic> messageAndTopic = (Pair<XMLMessage,Topic>)key;
+            logger.info("Message [{}] Acknowledged", messageAndTopic.getFirst().getApplicationMessageId());
+        }
+        
+        protected void handleMessageNak(Object key) {
+            @SuppressWarnings("unchecked")
+            Pair<XMLMessage,Topic> messageAndTopic = (Pair<XMLMessage,Topic>)key;
+            logger.info("Message [{}] Rejected", messageAndTopic.getFirst().getApplicationMessageId());
+
+            // In this case we do nothing other than log the rejected message
+        }
+    }
+
+    private static class OneByOneMessagePublisher extends WindowedPublisher {
+        public OneByOneMessagePublisher(String host, String vpnName, String userName, String password) {
+            super(host, vpnName, userName, password, 1);
+        }
+
         @Override
-        public void handleErrorEx(Object key, JCSMPException cause, long timestamp) {
-            if (key != null) {  // NACK
-                assert key instanceof BytesXMLMessage;
-                logger.warn(String.format("NACK for Message %s - %s", key, cause));
-                // probably want to do something here.  some error handling possibilities:
-                //  - send the message again
-                //  - send it somewhere else (error handling queue?)
-                //  - log and continue
-                //  - pause and retry (backoff) - maybe set a flag to slow down the publisher
-            } else {  // not a NACK, but some other error (ACL violation, connection loss, message too big, ...)
-                logger.warn("### Producer handleErrorEx() callback: %s%n", cause);
-                if (cause instanceof JCSMPTransportException) {  // all reconnect attempts failed
-                    isShutdown = true;  // let's quit; or, could initiate a new connection attempt
-                } else if (cause instanceof JCSMPErrorResponseException) {  // might have some extra info
-                    JCSMPErrorResponseException e = (JCSMPErrorResponseException)cause;
-                    logger.warn("Specifics: " + JCSMPErrorResponseSubcodeEx.getSubcodeAsString(e.getSubcodeEx()) + ": " + e.getResponsePhrase());
-                }
+        protected void handleMessageNak(Object key) {
+            @SuppressWarnings("unchecked")
+            Pair<XMLMessage,Topic> messageAndTopic = (Pair<XMLMessage,Topic>)key;
+
+            // For this example we will resend the message from the callback, because the main thread may
+            // have already called producer.send, there is a chance this resent message will be out-of-sequence
+            try {
+                this.producer.send(messageAndTopic.getFirst(), messageAndTopic.getSecond());
+                logger.info("Message [{}] Resent", messageAndTopic.getFirst().getApplicationMessageId());
+            } catch (JCSMPException e) {
+                // Something went really wrong.... for this example we will just give up
+                this.session.closeSession();
             }
         }
     }
+
+    private static class BlockingMessagePublisher extends WindowedPublisher {
+        public BlockingMessagePublisher(String host, String vpnName, String userName, String password) {
+            super(host, vpnName, userName, password, 1);
+        }
+
+        @Override
+        public void sendMessage(byte[] payload, String topicString) throws JCSMPException {
+            XMLMessage message = super.createMessage(payload);
+            Topic topic = JCSMPFactory.onlyInstance().createTopic(topicString);
+            
+            while(true) {
+                try {
+                    CompletableFuture<Boolean> publishResult = new CompletableFuture<Boolean>();
+                    message.setCorrelationKey(publishResult);  // used for ACK/NACK correlation locally within the API
+                    this.producer.send(message, topic);
+                    logger.info("Message [{}] Sent", message.getApplicationMessageId());
+                    
+                    
+                    // Here we block the calling thread until the current publish operation succeeds
+                    // this is a more direct approach to one-by-one messaging and prevents out-of-order messaging
+                    // at the tradeoff of lower message throughput
+                    Boolean published = publishResult.get();
+                    if(published) {
+                        logger.info("Message [{}] Acceped", message.getApplicationMessageId());
+                        break;
+                    } else {
+                        logger.info("Message [{}] Rejected", message.getApplicationMessageId());
+                        
+                        // Optionally add variable time delay to acheive exponential backoff...
+                    }
+                } catch (Exception ex) {
+                    this.session.closeSession();
+                }
+            }            
+            sequenceNumber++;
+        }
+
+        @Override
+        protected void handleMessageAck(Object key) {
+            @SuppressWarnings("unchecked")
+            CompletableFuture<Boolean> future = (CompletableFuture<Boolean>)key;
+            future.complete(true);
+        }
+
+        @Override
+        protected void handleMessageNak(Object key) {
+            @SuppressWarnings("unchecked")
+            CompletableFuture<Boolean> future = (CompletableFuture<Boolean>)key;
+            future.complete(false);
+        }
+    }
+
+    private static class TransactedPublisher extends WindowedPublisher {
+        private TransactedSession transactedSession;
+
+        public TransactedPublisher(String host, String vpnName, String userName, String password) {
+            super(host, vpnName, userName, password, PUBLISH_WINDOW_SIZE);
+        }
+
+        @Override
+        public void sendMessage(byte[] payload, String topicString) throws JCSMPException {
+            XMLMessage message = createMessage(payload);
+            Topic topic = JCSMPFactory.onlyInstance().createTopic(topicString);
+            
+            message.setCorrelationKey(new Pair<XMLMessage,Topic>(message, topic));  // used for ACK/NACK correlation locally within the API
+            this.producer.send(message, topic);
+            
+            logger.info("Message [{}] Sent", message.getApplicationMessageId());
+            
+            if(sequenceNumber % 10 == 0) {
+                this.transactedSession.commit();
+                logger.info("Message [{}] Committed\n", message.getApplicationMessageId());
+            }
+            sequenceNumber++;
+        }
+
+        @Override
+        protected XMLMessageProducer createMessageProducer() throws JCSMPException {
+            this.transactedSession = this.session.createTransactedSession();
+            ProducerFlowProperties flowProperties = new ProducerFlowProperties();
+
+            var eventHandler = new JCSMPStreamingPublishCorrelatingEventHandler() {
+                @Override
+                public void handleErrorEx(Object arg0, JCSMPException arg1, long arg2) {
+                    // TODO Auto-generated method stub
+                    throw new UnsupportedOperationException("Unimplemented method 'handleErrorEx'");
+                }
+
+                @Override
+                public void responseReceivedEx(Object arg0) {
+                    // TODO Auto-generated method stub
+                    throw new UnsupportedOperationException("Unimplemented method 'responseReceivedEx'");
+                }};
+
+            this.session.getMessageProducer(eventHandler);
+            return this.transactedSession.createProducer(flowProperties, eventHandler);
+        }
+    }    
 }
